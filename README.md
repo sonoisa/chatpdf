@@ -8,10 +8,10 @@ HTMLファイルの置き場所はデスクトップでもいいですし、ど�
 アプリを自分用に改造することもしやすいでしょう。
 
 
-## 利用方法の解説
-[【Chat with your PDF】2024年にPDF文書を読み解く人にお勧めしたい、サーバーレスなChatGPTアプリを公開](https://qiita.com/sonoisa/items/360e94b527ff2536ee49)
+## 利用方法
+* [【Chat with your PDF】2024年にPDF文書を読み解く人にお勧めしたい、サーバーレスなChatGPTアプリを公開](https://qiita.com/sonoisa/items/360e94b527ff2536ee49)
 
-
-
+## PDFファイルを読み込み要約を行った例
+![](https://github.com/sonoisa/chatpdf/blob/main/chatpdf_image.png)
 
 
