@@ -211,6 +211,16 @@ def extract_pages_from_page_tag(document_with_page_tag):
 
 
 def add_s(values):
+	"""
+	複数形のsを必要に応じて付けるために用いる関数。
+	与えられたリストの要素数が2以上なら"s"を返し、それ以外は""を返す。
+
+	Args:
+		values (list[any]): リスト
+
+	Returns:
+		str: 要素数が複数なら"s"、それ以外は""
+	"""
 	return "s" if len(values) > 1 else ""
 
 
@@ -256,7 +266,6 @@ def count_characters(document_with_tag):
 	Returns:
 		str: 文字数とトークン数の情報を含む文字列
 	"""
-
 	text = "".join([page.content for page in extract_pages_from_page_tag(document_with_tag)])
 
 	tokens = OPENAI_TOKENIZER.encode(text)
@@ -264,6 +273,9 @@ def count_characters(document_with_tag):
 
 
 class SearchEngine:
+	"""
+	検索エンジン
+	"""
 	def __init__(self, engine, pages):
 		self.engine = engine
 		self.pages = pages
@@ -272,6 +284,12 @@ class SearchEngine:
 SEARCH_ENGINE = None
 
 def create_search_engine(context):
+	"""
+	検索エンジンを作る。
+
+	Args:
+		context (str): 検索対象となるテキスト。ただし、テキストはchatpdf:pageというタグでページが括られているとする。
+	"""
 	global SEARCH_ENGINE
 
 	pages = extract_pages_from_page_tag(context)
@@ -293,6 +311,16 @@ def create_search_engine(context):
 
 
 def search_pages(keywords, page_limit):
+	"""
+	与えられたキーワードを含むページを検索する。
+
+	Args:
+		keywords (str): 検索キーワード
+		page_limit (int): 検索するページ数
+
+	Returns:
+		list[Page]: ヒットしたページ
+	"""
 	global SEARCH_ENGINE
 	if SEARCH_ENGINE is None:
 		return []
@@ -306,6 +334,15 @@ def search_pages(keywords, page_limit):
 
 
 def load_pages(page_numbers):
+	"""
+	与えられたページ番号のページを取得する。
+
+	Args:
+		page_numbers (list[int]): 取得するページ番号
+
+	Returns:
+		list[Page]: 取得したページ
+	"""
 	global SEARCH_ENGINE
 	if SEARCH_ENGINE is None:
 		return []
@@ -313,6 +350,55 @@ def load_pages(page_numbers):
 	page_numbers = set(page_numbers)
 	found_pages = [page for page in SEARCH_ENGINE.pages if page.number in page_numbers]
 	return found_pages
+
+
+CHAT_TOOLS = [
+	# ページ検索
+	{
+		"type": "function",
+		"function": {
+			"name": "search_pages",
+			"description": "与えられたキーワードを含むページを検索します。",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"keywords": {
+						"type": "string",
+						"description": "半角空白区切りの複数の検索キーワード, 例: Artificial General Intelligence 自律エージェント"
+					},
+					"page_limit": {
+						"type": "number",
+						"description": "検索するページ数, 例: 3",
+						"minimum": 1
+					}
+				}
+			},
+			"required": ["keywords"]
+		}
+	}, 
+	# ページ取得
+	{
+		"type": "function",
+		"function": {
+			"name": "load_pages",
+			"description": "与えられたページ番号のページを取得します。",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"page_numbers": {
+						"type": "array",
+						"items": {
+							"type": "number"
+						},
+						"minItems": 1,
+						"description": "取得するページのページ番号のリスト"
+					}
+				}
+			},
+			"required": ["page_numbers"]
+		}
+	}
+]
 
 
 async def process_prompt(prompt, history, context, platform, endpoint, azure_deployment, azure_api_version, api_key, model_name, max_tokens, temperature):
@@ -339,54 +425,6 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 	pages = extract_pages_from_page_tag(context)
 	if pages:
 		context = "".join([page.content for page in pages])
-
-	tools = [
-		# ページ検索
-		{
-			"type": "function",
-			"function": {
-				"name": "search_pages",
-				"description": "与えられたキーワードを含むページを検索します。",
-				"parameters": {
-					"type": "object",
-					"properties": {
-						"keywords": {
-							"type": "string",
-							"description": "半角空白区切りの複数の検索キーワード, 例: Artificial General Intelligence 自律エージェント"
-						},
-						"page_limit": {
-							"type": "number",
-							"description": "検索するページ数, 例: 3",
-							"minimum": 1
-						}
-					}
-				},
-				"required": ["keywords"]
-			}
-		}, 
-		# ページ取得
-		{
-			"type": "function",
-			"function": {
-				"name": "load_pages",
-				"description": "与えられたページ番号のページを取得します。",
-				"parameters": {
-					"type": "object",
-					"properties": {
-						"page_numbers": {
-							"type": "array",
-							"items": {
-								"type": "number"
-							},
-							"minItems": 1,
-							"description": "取得するページのページ番号のリスト"
-						}
-					}
-				},
-				"required": ["page_numbers"]
-			}
-		}
-	]
 
 	try:
 		messages = []
@@ -419,7 +457,7 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 				model=model_name,
 				max_tokens=max_tokens,
 				temperature=temperature,
-				tools=tools,
+				tools=CHAT_TOOLS,
 				tool_choice="auto",
 				stream=False
 			)
@@ -603,7 +641,7 @@ def main():
 			}
 		}'''
 
-	# プロンプト例
+	# メッセージ例
 	examples = {
 		"要約 (論文)": '''制約条件に従い、以下の研究論文で提案されている技術や手法について要約してください。
 
