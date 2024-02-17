@@ -34,6 +34,10 @@ https://opensource.org/license/mit/
 			.gallery-item > .gallery {
 				max-width: 380px;
 			}
+
+			#context > label > textarea {
+				scrollbar-width: thin !important;
+			}
 		</style>
 	</head>
 	<body>
@@ -41,10 +45,12 @@ https://opensource.org/license/mit/
 			<gradio-requirements>
 				pdfminer.six==20231228
 				pyodide-http==0.2.1
+				janome==0.5.0
+				rank_bm25==0.2.2
 			</gradio-requirements>
 
 			<gradio-file name="chat_history.json">
-[[null, "ようこそ！　PDFのテキストを参照しながら対話できるチャットボットです。\nPDFファイルをアップロードするとテキストが抽出されます。\nメッセージの中に{context}と書くと、抽出されたテキストがその部分に埋め込まれて対話が行われます。一番下のExamplesにその例があります。\nメッセージを書くときにShift+Enterを入力すると改行できます。"]]
+[[null, "ようこそ！　PDFのテキストを参照しながら対話できるチャットボットです。\nPDFファイルをアップロードするとテキストが抽出されます。\nメッセージの中に{context}と書くと、抽出されたテキストがその部分に埋め込まれて対話が行われます。他にもPDFのページを検索して参照したり、ページ番号を指定して参照したりすることができます。一番下のExamplesにこれらの例があります。\nメッセージを書くときにShift+Enterを入力すると改行できます。"]]
 			</gradio-file>
 
 			<gradio-file name="app.py" entrypoint>
@@ -53,21 +59,6 @@ import os
 # Gradioによるアナリティクスを無効化
 os.putenv("GRADIO_ANALYTICS_ENABLED", "False")
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
-
-import gradio as gr
-import base64
-from pathlib import Path
-import json
-
-import pyodide_http
-pyodide_http.patch_all()
-
-from pdfminer.pdfinterp import PDFResourceManager
-from pdfminer.converter import TextConverter
-from pdfminer.pdfinterp import PDFPageInterpreter
-from pdfminer.pdfpage import PDFPage
-from pdfminer.layout import LAParams
-from io import StringIO
 
 # openaiライブラリのインストール方法は https://github.com/pyodide/pyodide/issues/4292 を参考にしました。
 import micropip
@@ -86,6 +77,34 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 await micropip.install("https://raw.githubusercontent.com/sonoisa/pyodide_wheels/main/tiktoken/tiktoken-0.5.1-cp311-cp311-emscripten_3_1_45_wasm32.whl", keep_going=True)
 
 
+import gradio as gr
+import base64
+import json
+import unicodedata
+import re
+from pathlib import Path
+from dataclasses import dataclass
+import asyncio
+
+import pyodide_http
+pyodide_http.patch_all()
+
+from pdfminer.pdfinterp import PDFResourceManager
+from pdfminer.converter import TextConverter
+from pdfminer.pdfinterp import PDFPageInterpreter
+from pdfminer.pdfpage import PDFPage
+from pdfminer.layout import LAParams
+from io import StringIO
+
+from janome.tokenizer import Tokenizer as JanomeTokenizer
+from janome.analyzer import Analyzer as JanomeAnalyzer
+from janome.tokenfilter import POSStopFilter, LowerCaseFilter
+from rank_bm25 import BM25Okapi
+
+from openai import OpenAI, AzureOpenAI
+import tiktoken
+
+
 class URLLib3Transport(httpx.BaseTransport):
 	"""
 	urllib3を使用してhttpxのリクエストを処理するカスタムトランスポートクラス
@@ -101,14 +120,23 @@ class URLLib3Transport(httpx.BaseTransport):
 
 http_client = httpx.Client(transport=URLLib3Transport())
 
-from openai import OpenAI, AzureOpenAI
-import tiktoken
+
+@dataclass
+class Page:
+	"""
+	PDFのページ内容
+	"""
+	number: int
+	content: str
 
 
 OPENAI_TOKENIZER = tiktoken.get_encoding("cl100k_base")
+JANOME_TOKENIZER = JanomeTokenizer()
+JANOME_ANALYZER = JanomeAnalyzer(tokenizer=JANOME_TOKENIZER, 
+	token_filters=[POSStopFilter(["記号,空白"]), LowerCaseFilter()])
 
 
-def extract_text(pdf_filename):
+def extract_pdf_pages(pdf_filename):
 	"""
 	PDFファイルからテキストを抽出する。
 
@@ -116,8 +144,10 @@ def extract_text(pdf_filename):
 		pdf_filename (str): 抽出するPDFファイルのパス
 
 	Returns:
-		str: PDFファイルから抽出されたテキスト
+		list[Page]: PDFの各ページ内容のリスト
 	"""
+
+	pages = []
 	with open(pdf_filename, "rb") as pdf_file:
 		output = StringIO()
 		resource_manager = PDFResourceManager()
@@ -125,32 +155,79 @@ def extract_text(pdf_filename):
 		text_converter = TextConverter(resource_manager, output, laparams=laparams)
 		page_interpreter = PDFPageInterpreter(resource_manager, text_converter)
 
+		page_number = 0
 		for i_page in PDFPage.get_pages(pdf_file):
 			try:
+				page_number += 1
 				page_interpreter.process_page(i_page)
+				page_content = output.getvalue()
+				page_content = unicodedata.normalize('NFKC', page_content)
+				pages.append(Page(number=page_number, content=page_content))
+				output.truncate(0)
+				output.seek(0)
 			except Exception as e:
-				# print(e)
+				print(e)
 				pass
 
-		output_text = output.getvalue()
 		output.close()
 		text_converter.close()
-		return output_text
+
+		return pages
 
 
-def get_character_count_info(char_count, token_count):
+def merge_pages_with_page_tag(pages):
+	"""
+	PDFの各ページ内容を一つの文字列にマージする。
+	ただし、chatpdf:pageというタグでページを括る。
+	extract_pages_from_page_tag()の逆変換である。
+
+	Args:
+		pages (list[Page]): PDFの各ページ内容のリスト
+
+	Returns:
+		str: PDFの各ページ内容をマージした文字列
+	"""
+	document_with_page_tag = ""
+	for page in pages:
+		document_with_page_tag += f'&lt;chatpdf:page number="{page.number}"&gt;\n{page.content}\n&lt;/chatpdf:page&gt;\n'
+	return document_with_page_tag
+
+
+def extract_pages_from_page_tag(document_with_page_tag):
+	"""
+	chatpdf:pageというタグで括られた領域をPDFのページ内容と解釈して、Pageオブジェクトのリストに変換する。
+	merge_pages_with_page_tag()の逆変換である。
+
+	Args:
+		document_with_page_tag (str): chatpdf:pageというタグで各ページが括られた文字列
+
+	Returns:
+		list[Page]: Pageオブジェクトのリスト
+	"""
+	page_tag_pattern = r'&lt;chatpdf:page number="(\d+)"&gt;\n?(.*?)\n?&lt;\/chatpdf:page&gt;\n?'
+	matches = re.findall(page_tag_pattern, document_with_page_tag, re.DOTALL)
+	pages = [Page(number=int(number), content=content) for number, content in matches]
+	return pages
+
+
+def add_s(values):
+	return "s" if len(values) > 1 else ""
+
+
+def get_context_info(characters, tokens):
 	"""
 	文字数とトークン数の情報を文字列で返す。
 
 	Args:
-		char_count (int): 文字数
-		token_count (int): トークン数
+		characters (str): テキスト
+		tokens (list[str]): トークン
 
 	Returns:
 		str: 文字数とトークン数の情報を含む文字列
 	"""
-	return f"""{char_count:,} character{'s' if char_count > 1 else ''}
-{token_count:,} token{'s' if token_count > 1 else ''}"""
+	char_count = len(characters)
+	token_count = len(tokens)
+	return f"{char_count:,} character{add_s(characters)}\n{token_count:,} token{add_s(tokens)}"
 
 
 def update_context_element(pdf_file_obj):
@@ -163,25 +240,82 @@ def update_context_element(pdf_file_obj):
 	Returns:
 		Tuple: コンテキストテキストボックスに格納する抽出されたテキスト情報と、その文字数情報
 	"""
-	context = extract_text(pdf_file_obj.name)
-	return gr.update(value=context, interactive=True), count_characters(context)
+	pages = extract_pdf_pages(pdf_file_obj.name)
+	document_with_tag = merge_pages_with_page_tag(pages)
+	return gr.update(value=document_with_tag, interactive=True), count_characters(document_with_tag)
 
 
-def count_characters(text):
+def count_characters(document_with_tag):
 	"""
 	テキストの文字数とトークン数を計算する。
+	ただし、テキストはchatpdf:pageというタグでページが括られているとする。
 
 	Args:
-		text (str): 文字数とトークン数を計算するテキスト
+		document_with_tag (str): 文字数とトークン数を計算するテキスト
 
 	Returns:
 		str: 文字数とトークン数の情報を含む文字列
 	"""
+
+	text = "".join([page.content for page in extract_pages_from_page_tag(document_with_tag)])
+
 	tokens = OPENAI_TOKENIZER.encode(text)
-	return get_character_count_info(len(text), len(tokens))
+	return get_context_info(text, tokens)
 
 
-def process_prompt(prompt, history, context, platform, endpoint, azure_deployment, azure_api_version, api_key, model_name, max_tokens, temperature):
+class SearchEngine:
+	def __init__(self, engine, pages):
+		self.engine = engine
+		self.pages = pages
+
+
+SEARCH_ENGINE = None
+
+def create_search_engine(context):
+	global SEARCH_ENGINE
+
+	pages = extract_pages_from_page_tag(context)
+	tokenized_pages = []
+	original_pages = []
+	for page in pages:
+		page_content = page.content.strip()
+		if page_content:
+			tokenized_page = [token.base_form for token in JANOME_ANALYZER.analyze(page_content)]
+			if tokenized_page:
+				tokenized_pages.append(tokenized_page)
+				original_pages.append(page)
+
+	if tokenized_pages:
+		bm25 = BM25Okapi(tokenized_pages)
+		SEARCH_ENGINE = SearchEngine(engine=bm25, pages=original_pages)
+	else:
+		SEARCH_ENGINE = None
+
+
+def search_pages(keywords, page_limit):
+	global SEARCH_ENGINE
+	if SEARCH_ENGINE is None:
+		return []
+
+	tokenized_query = [token.base_form for token in JANOME_ANALYZER.analyze(keywords)]
+	if not tokenized_query:
+		return []
+
+	found_pages = SEARCH_ENGINE.engine.get_top_n(tokenized_query, SEARCH_ENGINE.pages, n=page_limit)
+	return found_pages
+
+
+def load_pages(page_numbers):
+	global SEARCH_ENGINE
+	if SEARCH_ENGINE is None:
+		return []
+
+	page_numbers = set(page_numbers)
+	found_pages = [page for page in SEARCH_ENGINE.pages if page.number in page_numbers]
+	return found_pages
+
+
+async def process_prompt(prompt, history, context, platform, endpoint, azure_deployment, azure_api_version, api_key, model_name, max_tokens, temperature):
 	"""
 	ユーザーのプロンプトを処理し、ChatGPTによる生成結果を返す。
 
@@ -201,6 +335,59 @@ def process_prompt(prompt, history, context, platform, endpoint, azure_deploymen
 	Returns:
 		str: ChatGPTによる生成結果
 	"""
+
+	pages = extract_pages_from_page_tag(context)
+	if pages:
+		context = "".join([page.content for page in pages])
+
+	tools = [
+		# ページ検索
+		{
+			"type": "function",
+			"function": {
+				"name": "search_pages",
+				"description": "与えられたキーワードを含むページを検索します。",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"keywords": {
+							"type": "string",
+							"description": "半角空白区切りの複数の検索キーワード, 例: Artificial General Intelligence 自律エージェント"
+						},
+						"page_limit": {
+							"type": "number",
+							"description": "検索するページ数, 例: 3",
+							"minimum": 1
+						}
+					}
+				},
+				"required": ["keywords"]
+			}
+		}, 
+		# ページ取得
+		{
+			"type": "function",
+			"function": {
+				"name": "load_pages",
+				"description": "与えられたページ番号のページを取得します。",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"page_numbers": {
+							"type": "array",
+							"items": {
+								"type": "number"
+							},
+							"minItems": 1,
+							"description": "取得するページのページ番号のリスト"
+						}
+					}
+				},
+				"required": ["page_numbers"]
+			}
+		}
+	]
+
 	try:
 		messages = []
 		for user_message, assistant_message in history:
@@ -227,20 +414,98 @@ def process_prompt(prompt, history, context, platform, endpoint, azure_deploymen
 					http_client=http_client
 				)
 
-		bot_response = ""
 		completion = openai_client.chat.completions.create(
 				messages=messages,
 				model=model_name,
 				max_tokens=max_tokens,
 				temperature=temperature,
+				tools=tools,
+				tool_choice="auto",
 				stream=False
 			)
 
+		bot_response = ""
 		if hasattr(completion, "error"):
 			raise gr.Error(completion.error["message"])
+
+		response_message = completion.choices[0].message
+		tool_calls = response_message.tool_calls
+		if tool_calls:
+			messages.append(response_message)
+
+			for tool_call in tool_calls:
+				function_name = tool_call.function.name
+				function_args = json.loads(tool_call.function.arguments)
+				if function_name == "search_pages":
+					# ページ検索
+					keywords = function_args.get("keywords").strip()
+					page_limit = function_args.get("page_limit") or 3
+
+					bot_response += f'Searching for pages containing the keyword{add_s(keywords.split(" "))} "{keywords}".\n'
+
+					found_pages = search_pages(keywords, page_limit)
+					function_response = json.dumps({
+							"status": "found" if found_pages else "not found",
+							"found_pages": [{
+								"page_number": page.number,
+								"page_content": page.content
+							} for page in found_pages]
+						}, ensure_ascii=False)
+					messages.append({
+							"tool_call_id": tool_call.id,
+							"role": "tool",
+							"name": function_name,
+							"content": function_response
+						})
+					if found_pages:
+						bot_response += f'Found page{add_s(found_pages)}: {", ".join([str(page.number) for page in found_pages])}.\n\n'
+					else:
+						bot_response += "Page not found.\n\n"
+				elif function_name == "load_pages":
+					# ページ取得
+					page_numbers = function_args.get("page_numbers")
+
+					bot_response += f'Trying to load page{add_s(page_numbers)} {", ".join(map(str, page_numbers))}.\n'
+
+					found_pages = load_pages(page_numbers)
+					function_response = json.dumps({
+							"status": "found" if found_pages else "not found",
+							"found_pages": [{
+								"page_number": page.number,
+								"page_content": page.content
+							} for page in found_pages]
+						}, ensure_ascii=False)
+					messages.append({
+							"tool_call_id": tool_call.id,
+							"role": "tool",
+							"name": function_name,
+							"content": function_response
+						})
+					if found_pages:
+						bot_response += f'Found page{add_s(found_pages)}: {", ".join([str(page.number) for page in found_pages])}.\n\n'
+					else:
+						bot_response += "Page not found.\n\n"
+
+			yield bot_response + "Generating response. Please wait a moment...\n"
+			await asyncio.sleep(0.1)
+
+			completion = openai_client.chat.completions.create(
+					messages=messages,
+					model=model_name,
+					max_tokens=max_tokens,
+					temperature=temperature,
+					stream=False
+				)
+
+			if hasattr(completion, "error"):
+				raise gr.Error(completion.error["message"])
+
+			response_message = completion.choices[0].message
+			bot_response += response_message.content
+			yield bot_response
+
 		else:
-			message = completion.choices[0].message
-			bot_response += message.content
+			bot_response += response_message.content
 			yield bot_response
 
 	except Exception as e:
@@ -280,11 +545,11 @@ def main():
 		CHAT_HISTORY = []
 
 	# localStorageから設定情報ををロードする。
-	js_define_utilities_and_load_settings = """() => {
+	js_define_utilities_and_load_settings = """() =&gt; {
 			const KEY_PREFIX = "serverless_chat_with_your_pdf:";
 
-			const loadSettings = () => {
-				const getItem = (key, defaultValue) => {
+			const loadSettings = () =&gt; {
+				const getItem = (key, defaultValue) =&gt; {
 					const jsonValue = localStorage.getItem(KEY_PREFIX + key);
 					if (jsonValue) {
 						return JSON.parse(jsonValue);
@@ -305,7 +570,7 @@ def main():
 				return [platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, save_chat_history_to_url];
 			};
 
-			globalThis.resetSettings = () => {
+			globalThis.resetSettings = () =&gt; {
 				for (let key in localStorage) {
 					if (key.startsWith(KEY_PREFIX)) {
 						localStorage.removeItem(key);
@@ -315,7 +580,7 @@ def main():
 				return loadSettings();
 			};
 
-			globalThis.saveItem = (key, value) => {
+			globalThis.saveItem = (key, value) =&gt; {
 				localStorage.setItem(KEY_PREFIX + key, JSON.stringify(value));
 			};
 
@@ -324,7 +589,7 @@ def main():
 		"""
 
 	# should_saveがtrueであればURLにチャット履歴を保存し、falseであればチャット履歴を削除する。
-	save_or_delete_chat_history = '''(hist, should_save) => {
+	save_or_delete_chat_history = '''(hist, should_save) =&gt; {
 			saveItem("save_chat_history_to_url", should_save);
 			if (!should_save) {
 				const url = new URL(window.location.href);
@@ -338,98 +603,9 @@ def main():
 			}
 		}'''
 
-	with gr.Blocks(theme=gr.themes.Default(), analytics_enabled=False) as app:
-		with gr.Tabs():
-			with gr.TabItem("Settings"):
-				with gr.Row():
-					with gr.Column():
-						platform = gr.Radio(label="Platform", interactive=True, 
-							choices=["OpenAI", "Azure"], value="OpenAI")
-						platform.change(None, inputs=platform, outputs=None, 
-							js='(x) => saveItem("platform", x)', show_progress="hidden")
-
-						with gr.Row():
-							endpoint = gr.Textbox(label="Endpoint", interactive=True)
-							endpoint.change(None, inputs=endpoint, outputs=None, 
-								js='(x) => saveItem("endpoint", x)', show_progress="hidden")
-
-							azure_deployment = gr.Textbox(label="Azure Deployment", interactive=True)
-							azure_deployment.change(None, inputs=azure_deployment, outputs=None, 
-								js='(x) => saveItem("azure_deployment", x)', show_progress="hidden")
-
-							azure_api_version = gr.Textbox(label="Azure API Version", interactive=True)
-							azure_api_version.change(None, inputs=azure_api_version, outputs=None, 
-								js='(x) => saveItem("azure_api_version", x)', show_progress="hidden")
-
-						with gr.Row():
-							api_key_file = gr.File(file_count="single", file_types=["text"], 
-								height=80, label="API Key File")
-							api_key = gr.Textbox(label="API Key", type="password", interactive=True)
-							# 注意: 秘密情報をlocalStorageに保存してはならない。他者に秘密情報が盗まれる危険性があるからである。
-
-							api_key_file.upload(fn=load_api_key, inputs=api_key_file, outputs=api_key, 
-								show_progress="hidden")
-							api_key_file.clear(fn=lambda: None, inputs=None, outputs=api_key, show_progress="hidden")
-
-						model_name = gr.Textbox(label="model", interactive=True)
-						model_name.change(None, inputs=model_name, outputs=None, 
-							js='(x) => saveItem("model_name", x)', show_progress="hidden")
-
-						max_tokens = gr.Number(label="Max Tokens", interactive=True,
-							minimum=0, precision=0, step=1)
-						max_tokens.change(None, inputs=max_tokens, outputs=None, 
-							js='(x) => saveItem("max_tokens", x)', show_progress="hidden")
-
-						temperature = gr.Slider(label="Temperature", interactive=True,
-							minimum=0.0, maximum=1.0, step=0.1)
-						temperature.change(None, inputs=temperature, outputs=None, 
-							js='(x) => saveItem("temperature", x)', show_progress="hidden")
-
-						save_chat_history_to_url = gr.Checkbox(label="Save Chat History to URL", interactive=True)
-
-						setting_items = [platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, save_chat_history_to_url]
-						reset_button = gr.Button("Reset Settings")
-						reset_button.click(None, inputs=None, outputs=setting_items, 
-							js="() => resetSettings()", show_progress="hidden")
-
-			with gr.TabItem("Chat"):
-				with gr.Row():
-					with gr.Column(scale=1):
-						pdf_file = gr.File(file_count="single", file_types=[".pdf"], 
-							height=80, label="PDF")
-						context = gr.Textbox(label="Context", lines=20, 
-							interactive=True, autoscroll=False, show_copy_button=True)
-						char_counter = gr.Textbox(label="Statistics", value=get_character_count_info(0, 0), 
-							lines=2, max_lines=2, interactive=False, container=True)
-
-						pdf_file.upload(fn=update_context_element, inputs=pdf_file, outputs=[context, char_counter])
-						pdf_file.clear(fn=lambda: None, inputs=None, outputs=context, show_progress="hidden")
-
-						context.change(fn=count_characters, inputs=context, outputs=char_counter, show_progress="hidden")
-
-					with gr.Column(scale=2):
-						chatbot = gr.Chatbot(
-							CHAT_HISTORY,
-							elem_id="chatbot", render=False, height=500, show_copy_button=True,
-							sanitize_html=False, render_markdown=False, likeable=False, layout="bubble",
-							avatar_images=[None, Path("robot.png")])
-
-						chat_message_textbox = gr.Textbox(placeholder="Type a message...", 
-							render=False, container=False, scale=7)
-
-						chatbot.change(None, inputs=[chatbot, save_chat_history_to_url], outputs=None, 
-							# チャット履歴をクエリパラメータに保存する。
-							js=save_or_delete_chat_history, show_progress="hidden")
-
-						save_chat_history_to_url.change(None, inputs=[chatbot, save_chat_history_to_url], outputs=None, 
-							js=save_or_delete_chat_history, show_progress="hidden")
-
-						chat = gr.ChatInterface(process_prompt, 
-							title="Chat with your PDF", 
-							chatbot=chatbot, 
-							textbox=chat_message_textbox, 
-							additional_inputs=[context, platform, endpoint, azure_deployment, azure_api_version, api_key, model_name, max_tokens, temperature], 
-							examples=[['''制約条件に従い、以下の研究論文で提案されている技術や手法について要約してください。
+	# プロンプト例
+	examples = {
+		"要約 (論文)": '''制約条件に従い、以下の研究論文で提案されている技術や手法について要約してください。
 
 # 制約条件
 * 要約者: 大学教授
@@ -448,11 +624,12 @@ def main():
 {context}
 """
 
-# 要約結果'''], ['''制約条件に従い、以下の文書の内容を要約してください。
+# 要約結果''', 
+		"要約 (一般)": '''制約条件に従い、以下の文書の内容を要約してください。
 
 # 制約条件
-* 要約者: 大学教授
-* 想定読者: 大学院生
+* 要約者: 技術コンサルタント
+* 想定読者: 経営層、CTO、CIO
 * 形式: 箇条書き
 * 分量: 20項目
 * 要約結果の言語: 日本語
@@ -462,7 +639,8 @@ def main():
 {context}
 """
 
-# 要約'''], ['''制約条件に従い、以下の文書から情報を抽出してください。
+# 要約''', 
+		"情報抽出": '''制約条件に従い、以下の文書から情報を抽出してください。
 
 # 制約条件
 * 抽出する情報: 課題や問題点について言及している全ての文。一つも見落とさないでください。
@@ -474,7 +652,159 @@ def main():
 {context}
 """
 
-# 抽出結果'''], ["続きを生成してください。"]])
+# 抽出結果''', 
+		"QA (RAG)": '''次の質問に回答するために役立つページを検索して、その検索結果を使って回答して下さい。
+
+# 制約条件
+* 検索クエリの生成方法: 質問文の3つの言い換え（paraphrase）をカンマ区切りで連結した文字列
+* 検索クエリの言語: 英語
+* 検索するページ数: 3
+* 回答方法: 
+  - 検索結果の情報のみを用いて回答すること。
+  - 回答に利用した文章のあるページ番号を最後に出力すること。形式: "参考ページ番号: 71, 59, 47"
+  - 回答に役立つ情報が検索結果内にない場合は「検索結果には回答に役立つ情報がありませんでした。」と回答すること。
+* 回答の言語: 日本語
+
+# 質問
+どのような方法で、提案された手法が有効であると評価しましたか？
+
+# 回答''', 
+		"要約 (RAG)": '''次のキーワードを含むページを検索して、その検索結果をページごとに要約して下さい。
+
+# 制約条件
+* キーワード: dataset datasets
+* 検索するページ数: 3
+* 要約結果の言語: 日本語
+* 要約の形式:
+  ## ページ番号（例: 12ページ）
+  - 要約文1
+  - 要約文2
+  ...
+* 要約の分量: 各ページ3項目
+
+# 要約''', 
+		"翻訳 (RAG)": '''次のキーワードを含むページを検索して、その検索結果を日本語に翻訳して下さい。
+
+# 制約条件
+* キーワード: dataset datasets
+* 検索するページ数: 1
+
+# 翻訳結果''', 
+		"要約 (ページ指定)": '''16〜17ページをページごとに箇条書きで要約して下さい。
+
+# 制約条件
+* 要約結果の言語: 日本語
+* 要約の形式:
+  ## ページ番号（例: 12ページ）
+  - 要約文1
+  - 要約文2
+  ...
+* 要約の分量: 各ページ5項目
+
+# 要約''', 
+		"続きを生成": "続きを生成してください。"
+	}
+
+	with gr.Blocks(theme=gr.themes.Default(), analytics_enabled=False) as app:
+		with gr.Tabs():
+			with gr.TabItem("Settings"):
+				with gr.Row():
+					with gr.Column():
+						platform = gr.Radio(label="Platform", interactive=True, 
+							choices=["OpenAI", "Azure"], value="OpenAI")
+						platform.change(None, inputs=platform, outputs=None, 
+							js='(x) =&gt; saveItem("platform", x)', show_progress="hidden")
+
+						with gr.Row():
+							endpoint = gr.Textbox(label="Endpoint", interactive=True)
+							endpoint.change(None, inputs=endpoint, outputs=None, 
+								js='(x) =&gt; saveItem("endpoint", x)', show_progress="hidden")
+
+							azure_deployment = gr.Textbox(label="Azure Deployment", interactive=True)
+							azure_deployment.change(None, inputs=azure_deployment, outputs=None, 
+								js='(x) =&gt; saveItem("azure_deployment", x)', show_progress="hidden")
+
+							azure_api_version = gr.Textbox(label="Azure API Version", interactive=True)
+							azure_api_version.change(None, inputs=azure_api_version, outputs=None, 
+								js='(x) =&gt; saveItem("azure_api_version", x)', show_progress="hidden")
+
+						with gr.Row():
+							api_key_file = gr.File(file_count="single", file_types=["text"], 
+								height=80, label="API Key File")
+							api_key = gr.Textbox(label="API Key", type="password", interactive=True)
+							# 注意: 秘密情報をlocalStorageに保存してはならない。他者に秘密情報が盗まれる危険性があるからである。
+
+							api_key_file.upload(load_api_key, inputs=api_key_file, outputs=api_key, 
+								show_progress="hidden")
+							api_key_file.clear(lambda: None, inputs=None, outputs=api_key, show_progress="hidden")
+
+						model_name = gr.Textbox(label="model", interactive=True)
+						model_name.change(None, inputs=model_name, outputs=None, 
+							js='(x) =&gt; saveItem("model_name", x)', show_progress="hidden")
+
+						max_tokens = gr.Number(label="Max Tokens", interactive=True,
+							minimum=0, precision=0, step=1)
+						max_tokens.change(None, inputs=max_tokens, outputs=None, 
+							js='(x) =&gt; saveItem("max_tokens", x)', show_progress="hidden")
+
+						temperature = gr.Slider(label="Temperature", interactive=True,
+							minimum=0.0, maximum=1.0, step=0.1)
+						temperature.change(None, inputs=temperature, outputs=None, 
+							js='(x) =&gt; saveItem("temperature", x)', show_progress="hidden")
+
+						save_chat_history_to_url = gr.Checkbox(label="Save Chat History to URL", interactive=True)
+
+						setting_items = [platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, 
+							temperature, save_chat_history_to_url]
+						reset_button = gr.Button("Reset Settings")
+						reset_button.click(None, inputs=None, outputs=setting_items, 
+							js="() =&gt; resetSettings()", show_progress="hidden")
+
+			with gr.TabItem("Chat"):
+				with gr.Row():
+					with gr.Column(scale=1):
+						pdf_file = gr.File(file_count="single", file_types=[".pdf"], 
+							height=80, label="PDF")
+						context = gr.Textbox(elem_id="context", label="Context", lines=20, 
+							interactive=True, autoscroll=False, show_copy_button=True)
+						char_counter = gr.Textbox(label="Statistics", value=get_context_info("", []), 
+							lines=2, max_lines=2, interactive=False, container=True)
+
+						pdf_file.upload(update_context_element, inputs=pdf_file, outputs=[context, char_counter])
+						pdf_file.clear(lambda: None, inputs=None, outputs=context, show_progress="hidden")
+
+						(context.change(count_characters, inputs=context, outputs=char_counter, show_progress="hidden")
+							.then(create_search_engine, inputs=context, outputs=None))
+
+					with gr.Column(scale=2):
+						chatbot = gr.Chatbot(
+							CHAT_HISTORY,
+							elem_id="chatbot", render=False, height=500, show_copy_button=True,
+							sanitize_html=False, render_markdown=False, likeable=False, layout="bubble",
+							avatar_images=[None, Path("robot.png")])
+
+						chat_message_textbox = gr.Textbox(placeholder="Type a message...", 
+							render=False, container=False, interactive=True, scale=7)
+
+						chatbot.change(None, inputs=[chatbot, save_chat_history_to_url], outputs=None, 
+							# チャット履歴をクエリパラメータに保存する。
+							js=save_or_delete_chat_history, show_progress="hidden")
+
+						save_chat_history_to_url.change(None, inputs=[chatbot, save_chat_history_to_url], outputs=None, 
+							js=save_or_delete_chat_history, show_progress="hidden")
+
+						chat = gr.ChatInterface(process_prompt, 
+							title="Chat with your PDF", 
+							chatbot=chatbot, 
+							textbox=chat_message_textbox, 
+							additional_inputs=[context, platform, endpoint, azure_deployment, azure_api_version, api_key, 
+								model_name, max_tokens, temperature], 
+							examples=None)
+
+						example_title_textbox = gr.Textbox(visible=False, interactive=True)
+						gr.Examples([[k] for k, v in examples.items()], 
+							inputs=example_title_textbox, outputs=chat_message_textbox, 
+							fn=lambda title: examples[title], run_on_click=True)
 
 		app.load(None, inputs=None, outputs=setting_items, 
 			js=js_define_utilities_and_load_settings, show_progress="hidden")
