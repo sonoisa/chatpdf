@@ -358,17 +358,17 @@ CHAT_TOOLS = [
 		"type": "function",
 		"function": {
 			"name": "search_pages",
-			"description": "与えられたキーワードを含むページを検索します。",
+			"description": "Searches for pages containing the given keywords.",
 			"parameters": {
 				"type": "object",
 				"properties": {
 					"keywords": {
 						"type": "string",
-						"description": "半角空白区切りの複数の検索キーワード, 例: Artificial General Intelligence 自律エージェント"
+						"description": 'Search keywords separated by spaces. For example, "Artificial General Intelligence 自律エージェント".'
 					},
 					"page_limit": {
 						"type": "number",
-						"description": "検索するページ数, 例: 3",
+						"description": "Maximum number of search results to return. For example, 3.",
 						"minimum": 1
 					}
 				}
@@ -381,7 +381,7 @@ CHAT_TOOLS = [
 		"type": "function",
 		"function": {
 			"name": "load_pages",
-			"description": "与えられたページ番号のページを取得します。",
+			"description": "Loads pages specified by their page numbers.",
 			"parameters": {
 				"type": "object",
 				"properties": {
@@ -390,8 +390,8 @@ CHAT_TOOLS = [
 						"items": {
 							"type": "number"
 						},
-						"minItems": 1,
-						"description": "取得するページのページ番号のリスト"
+						"description": "List of page numbers to be load",
+						"minItems": 1
 					}
 				}
 			},
@@ -691,7 +691,23 @@ def main():
 """
 
 # 抽出結果''', 
-		"QA (RAG)": '''次の質問に回答するために役立つページを検索して、その検索結果を使って回答して下さい。
+		"QA (日本語文書RAG)": '''次の質問に回答するために役立つページを検索して、その検索結果を使って回答して下さい。
+
+# 制約条件
+* 検索クエリの生成方法: 質問文の3つの言い換え（paraphrase）をカンマ区切りで連結した文字列
+* 検索クエリの言語: 日本語
+* 検索するページ数: 3
+* 回答方法: 
+  - 検索結果の情報のみを用いて回答すること。
+  - 回答に利用した文章のあるページ番号を最後に出力すること。形式: "参考ページ番号: 71, 59, 47"
+  - 回答に役立つ情報が検索結果内にない場合は「検索結果には回答に役立つ情報がありませんでした。」と回答すること。
+* 回答の言語: 日本語
+
+# 質問
+どのような方法で、提案された手法が有効であると評価しましたか？
+
+# 回答''', 
+		"QA (英語文書RAG)": '''次の質問に回答するために役立つページを検索して、その検索結果を使って回答して下さい。
 
 # 制約条件
 * 検索クエリの生成方法: 質問文の3つの言い換え（paraphrase）をカンマ区切りで連結した文字列
