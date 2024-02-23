@@ -409,6 +409,8 @@ CHAT_TOOLS = [
 	}
 ]
 
+CHAT_TOOLS_TOKENS = 139
+
 
 def get_openai_messages(prompt, history, context):
 	global SEARCH_ENGINE
@@ -428,7 +430,8 @@ def get_openai_messages(prompt, history, context):
 	return messages
 
 
-actual_total_cost = 0
+actual_total_cost_prompt = 0
+actual_total_cost_completion = 0
 
 
 async def process_prompt(prompt, history, context, platform, endpoint, azure_deployment, azure_api_version, api_key, model_name, max_tokens, temperature):
@@ -451,15 +454,10 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 	Returns:
 		str: ChatGPTによる生成結果
 	"""
-	global actual_total_cost
+	global actual_total_cost_prompt, actual_total_cost_completion
 
 	try:
 		messages = get_openai_messages(prompt, history, context)
-
-		history_token_count = 0
-		for message in messages:
-			tokens = OPENAI_TOKENIZER.encode(message["content"])
-			history_token_count += len(tokens)
 
 		if platform == "OpenAI":
 			openai_client = OpenAI(
@@ -492,7 +490,8 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 
 		response_message = completion.choices[0].message
 		tool_calls = response_message.tool_calls
-		actual_total_cost += completion.usage.total_tokens
+		actual_total_cost_prompt += completion.usage.prompt_tokens
+		actual_total_cost_completion += completion.usage.completion_tokens
 
 		if tool_calls:
 			messages.append(response_message)
@@ -550,8 +549,10 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 						bot_response += f'Found page{add_s(found_pages)}: {", ".join([str(page.number) for page in found_pages])}.\n\n'
 					else:
 						bot_response += "Page not found.\n\n"
+				else:
+					raise gr.Error(f"Unknown function calling '{function_name}'.")
 
-			yield bot_response + "Generating response. Please wait a moment...\n", history_token_count
+			yield bot_response + "Generating response. Please wait a moment...\n"
 			await asyncio.sleep(0.1)
 
 			completion = openai_client.chat.completions.create(
@@ -561,18 +562,19 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 					temperature=temperature,
 					stream=False
 				)
-			actual_total_cost += completion.usage.total_tokens
+			actual_total_cost_prompt += completion.usage.prompt_tokens
+			actual_total_cost_completion += completion.usage.completion_tokens
 
 			if hasattr(completion, "error"):
 				raise gr.Error(completion.error["message"])
 
 			response_message = completion.choices[0].message
 			bot_response += response_message.content
-			yield bot_response, history_token_count + len(OPENAI_TOKENIZER.encode(bot_response))
+			yield bot_response
 
 		else:
 			bot_response += response_message.content
-			yield bot_response, history_token_count + len(OPENAI_TOKENIZER.encode(bot_response))
+			yield bot_response
 
 	except Exception as e:
 		if hasattr(e, "message"):
@@ -600,7 +602,8 @@ def load_api_key(file_obj):
 
 
 def get_cost_info(prompt_token_count):
-	return f"Estimated processing cost: {prompt_token_count:,} tokens, Actual total cost: {actual_total_cost:,} tokens"
+	return f"Estimated input cost: {prompt_token_count + CHAT_TOOLS_TOKENS:,} tokens,  Actual total input cost: {actual_total_cost_prompt:,} tokens,  Actual total output cost: {actual_total_cost_completion:,} tokens"
+
 
 def main():
 	"""
@@ -859,12 +862,6 @@ def main():
 						pdf_file.upload(update_context_element, inputs=pdf_file, outputs=[context, char_counter])
 						pdf_file.clear(lambda: None, inputs=None, outputs=context, show_progress="hidden")
 
-						context.change(
-								count_characters, inputs=context, outputs=char_counter, show_progress="hidden"
-							).then(
-								create_search_engine, inputs=context, outputs=None
-							)
-
 					with gr.Column(scale=2):
 
 						additional_inputs = [context, platform, endpoint, azure_deployment, azure_api_version, api_key, 
@@ -891,8 +888,7 @@ def main():
 										submit_button = gr.Button("Submit", variant="primary", scale=1, min_width=150)
 										stop_button = gr.Button("Stop", variant="stop", visible=False, scale=1, min_width=150)
 
-								cost_info = gr.Textbox(elem_id="cost_info", label="Cost", 
-									value=get_cost_info(0),
+								cost_info = gr.Textbox(elem_id="cost_info", value=get_cost_info(0),
 									lines=1, max_lines=1, interactive=False, container=False, elem_classes="cost_info")
 
 								with gr.Row():
@@ -936,16 +932,16 @@ def main():
 							generator = process_prompt(*inputs)
 
 							try:
-								first_response, message_cost = await gr.utils.async_iteration(generator)
+								first_response = await gr.utils.async_iteration(generator)
 								update = history + [[message, first_response]]
-								yield update, update, get_cost_info(message_cost)
+								yield update, update
 							except StopIteration:
 								update = history + [[message, None]]
-								yield update, update, get_cost_info(message_cost)
+								yield update, update
 
-							async for response, message_cost in generator:
+							async for response in generator:
 								update = history + [[message, response]]
-								yield update, update, get_cost_info(message_cost)
+								yield update, update
 
 						submit_triggers = [message_textbox.submit, submit_button.click]
 
@@ -954,7 +950,9 @@ def main():
 							).then(
 								append_message_to_history, inputs=[message_state, chatbot_state], outputs=[chatbot, chatbot_state], queue=False
 							).then(
-								submit_message, inputs=[message_state, chatbot_state] + additional_inputs, outputs=[chatbot, chatbot_state, cost_info]
+								submit_message, inputs=[message_state, chatbot_state] + additional_inputs, outputs=[chatbot, chatbot_state]
+							).then(
+								estimate_message_cost, inputs=[message_textbox, chatbot, context], outputs=cost_info, show_progress="hidden"
 							)
 
 						for submit_trigger in submit_triggers:
@@ -970,17 +968,25 @@ def main():
 							).then(
 								append_message_to_history, inputs=[message_state, chatbot_state], outputs=[chatbot, chatbot_state], queue=False
 							).then(
-								submit_message, inputs=[message_state, chatbot_state] + additional_inputs, outputs=[chatbot, chatbot_state, cost_info]
+								submit_message, inputs=[message_state, chatbot_state] + additional_inputs, outputs=[chatbot, chatbot_state]
+							).then(
+								estimate_message_cost, inputs=[message_textbox, chatbot, context], outputs=cost_info, show_progress="hidden"
 							)
 
 						undo_button.click(
 								undo_chat, inputs=[chatbot_state], outputs=[chatbot, chatbot_state, message_state], queue=False
 							).then(
 								lambda message: message, inputs=message_state, outputs=message_textbox, queue=False
+							).then(
+								estimate_message_cost, inputs=[message_textbox, chatbot, context], outputs=cost_info, show_progress="hidden"
 							)
 
-						clear_button.click(lambda: ([], [], None), inputs=None, outputs=[chatbot, chatbot_state, message_state], 
-							queue=False)
+						clear_button.click(
+								lambda: ([], [], None), inputs=None, outputs=[chatbot, chatbot_state, message_state], 
+							queue=False
+							).then(
+								estimate_message_cost, inputs=[message_textbox, chatbot, context], outputs=cost_info, show_progress="hidden"
+							)
 
 						chatbot.change(None, inputs=[chatbot, save_chat_history_to_url], outputs=None, 
 							# チャット履歴をクエリパラメータに保存する。
@@ -988,6 +994,14 @@ def main():
 
 						save_chat_history_to_url.change(None, inputs=[chatbot, save_chat_history_to_url], outputs=None, 
 							js=save_or_delete_chat_history, show_progress="hidden")
+
+						context.change(
+								count_characters, inputs=context, outputs=char_counter, show_progress="hidden"
+							).then(
+								create_search_engine, inputs=context, outputs=None
+							).then(
+								estimate_message_cost, inputs=[message_textbox, chatbot, context], outputs=cost_info, show_progress="hidden"
+							)
 
 		app.load(None, inputs=None, outputs=setting_items, 
 			js=js_define_utilities_and_load_settings, show_progress="hidden")
