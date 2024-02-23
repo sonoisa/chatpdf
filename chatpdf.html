@@ -38,6 +38,14 @@ https://opensource.org/license/mit/
 			#context > label > textarea {
 				scrollbar-width: thin !important;
 			}
+
+			#cost_info {
+				border-style: none !important;
+			}
+
+			#cost_info > label > input {
+				background: var(--panel-background-fill) !important;
+			}
 		</style>
 	</head>
 	<body>
@@ -77,6 +85,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 await micropip.install("https://raw.githubusercontent.com/sonoisa/pyodide_wheels/main/tiktoken/tiktoken-0.5.1-cp311-cp311-emscripten_3_1_45_wasm32.whl", keep_going=True)
 
 
+import inspect
 import gradio as gr
 import base64
 import json
@@ -401,6 +410,27 @@ CHAT_TOOLS = [
 ]
 
 
+def get_openai_messages(prompt, history, context):
+	global SEARCH_ENGINE
+	if SEARCH_ENGINE is not None:
+		context = "".join([page.content for page in SEARCH_ENGINE.pages])
+
+	messages = []
+	for user_message, assistant_message in history:
+		if user_message is not None and assistant_message is not None:
+			user_message = user_message.replace("{context}", context)
+			messages.append({ "role": "user", "content": user_message })
+			messages.append({ "role": "assistant", "content": assistant_message })
+
+	prompt = prompt.replace("{context}", context)
+	messages.append({ "role": "user", "content": prompt })
+
+	return messages
+
+
+actual_total_cost = 0
+
+
 async def process_prompt(prompt, history, context, platform, endpoint, azure_deployment, azure_api_version, api_key, model_name, max_tokens, temperature):
 	"""
 	ユーザーのプロンプトを処理し、ChatGPTによる生成結果を返す。
@@ -421,21 +451,15 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 	Returns:
 		str: ChatGPTによる生成結果
 	"""
-
-	pages = extract_pages_from_page_tag(context)
-	if pages:
-		context = "".join([page.content for page in pages])
+	global actual_total_cost
 
 	try:
-		messages = []
-		for user_message, assistant_message in history:
-			if user_message is not None and assistant_message is not None:
-				user_message = user_message.replace("{context}", context)
-				messages.append({ "role": "user", "content": user_message })
-				messages.append({ "role": "assistant", "content": assistant_message })
+		messages = get_openai_messages(prompt, history, context)
 
-		prompt = prompt.replace("{context}", context)
-		messages.append({ "role": "user", "content": prompt })
+		history_token_count = 0
+		for message in messages:
+			tokens = OPENAI_TOKENIZER.encode(message["content"])
+			history_token_count += len(tokens)
 
 		if platform == "OpenAI":
 			openai_client = OpenAI(
@@ -468,6 +492,8 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 
 		response_message = completion.choices[0].message
 		tool_calls = response_message.tool_calls
+		actual_total_cost += completion.usage.total_tokens
+
 		if tool_calls:
 			messages.append(response_message)
 
@@ -499,6 +525,7 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 						bot_response += f'Found page{add_s(found_pages)}: {", ".join([str(page.number) for page in found_pages])}.\n\n'
 					else:
 						bot_response += "Page not found.\n\n"
+
 				elif function_name == "load_pages":
 					# ページ取得
 					page_numbers = function_args.get("page_numbers")
@@ -524,7 +551,7 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 					else:
 						bot_response += "Page not found.\n\n"
 
-			yield bot_response + "Generating response. Please wait a moment...\n"
+			yield bot_response + "Generating response. Please wait a moment...\n", history_token_count
 			await asyncio.sleep(0.1)
 
 			completion = openai_client.chat.completions.create(
@@ -534,23 +561,25 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 					temperature=temperature,
 					stream=False
 				)
+			actual_total_cost += completion.usage.total_tokens
 
 			if hasattr(completion, "error"):
 				raise gr.Error(completion.error["message"])
 
 			response_message = completion.choices[0].message
 			bot_response += response_message.content
-			yield bot_response
+			yield bot_response, history_token_count + len(OPENAI_TOKENIZER.encode(bot_response))
 
 		else:
 			bot_response += response_message.content
-			yield bot_response
+			yield bot_response, history_token_count + len(OPENAI_TOKENIZER.encode(bot_response))
 
 	except Exception as e:
 		if hasattr(e, "message"):
 			raise gr.Error(e.message)
 		else:
 			raise gr.Error(str(e))
+
 
 
 def load_api_key(file_obj):
@@ -569,6 +598,9 @@ def load_api_key(file_obj):
 	except Exception as e:
 		raise gr.Error(str(e))
 
+
+def get_cost_info(prompt_token_count):
+	return f"Estimated processing cost: {prompt_token_count:,} tokens, Actual total cost: {actual_total_cost:,} tokens"
 
 def main():
 	"""
@@ -762,26 +794,26 @@ def main():
 	with gr.Blocks(theme=gr.themes.Default(), analytics_enabled=False) as app:
 		with gr.Tabs():
 			with gr.TabItem("Settings"):
-				with gr.Row():
-					with gr.Column():
-						platform = gr.Radio(label="Platform", interactive=True, 
-							choices=["OpenAI", "Azure"], value="OpenAI")
-						platform.change(None, inputs=platform, outputs=None, 
-							js='(x) =&gt; saveItem("platform", x)', show_progress="hidden")
+				with gr.Column():
+					platform = gr.Radio(label="Platform", interactive=True, 
+						choices=["OpenAI", "Azure"], value="OpenAI")
+					platform.change(None, inputs=platform, outputs=None, 
+						js='(x) =&gt; saveItem("platform", x)', show_progress="hidden")
 
-						with gr.Row():
-							endpoint = gr.Textbox(label="Endpoint", interactive=True)
-							endpoint.change(None, inputs=endpoint, outputs=None, 
-								js='(x) =&gt; saveItem("endpoint", x)', show_progress="hidden")
+					with gr.Row():
+						endpoint = gr.Textbox(label="Endpoint", interactive=True)
+						endpoint.change(None, inputs=endpoint, outputs=None, 
+							js='(x) =&gt; saveItem("endpoint", x)', show_progress="hidden")
 
-							azure_deployment = gr.Textbox(label="Azure Deployment", interactive=True)
-							azure_deployment.change(None, inputs=azure_deployment, outputs=None, 
-								js='(x) =&gt; saveItem("azure_deployment", x)', show_progress="hidden")
+						azure_deployment = gr.Textbox(label="Azure Deployment", interactive=True)
+						azure_deployment.change(None, inputs=azure_deployment, outputs=None, 
+							js='(x) =&gt; saveItem("azure_deployment", x)', show_progress="hidden")
 
-							azure_api_version = gr.Textbox(label="Azure API Version", interactive=True)
-							azure_api_version.change(None, inputs=azure_api_version, outputs=None, 
-								js='(x) =&gt; saveItem("azure_api_version", x)', show_progress="hidden")
+						azure_api_version = gr.Textbox(label="Azure API Version", interactive=True)
+						azure_api_version.change(None, inputs=azure_api_version, outputs=None, 
+							js='(x) =&gt; saveItem("azure_api_version", x)', show_progress="hidden")
 
+					with gr.Group():
 						with gr.Row():
 							api_key_file = gr.File(file_count="single", file_types=["text"], 
 								height=80, label="API Key File")
@@ -792,27 +824,27 @@ def main():
 								show_progress="hidden")
 							api_key_file.clear(lambda: None, inputs=None, outputs=api_key, show_progress="hidden")
 
-						model_name = gr.Textbox(label="model", interactive=True)
-						model_name.change(None, inputs=model_name, outputs=None, 
-							js='(x) =&gt; saveItem("model_name", x)', show_progress="hidden")
+					model_name = gr.Textbox(label="model", interactive=True)
+					model_name.change(None, inputs=model_name, outputs=None, 
+						js='(x) =&gt; saveItem("model_name", x)', show_progress="hidden")
 
-						max_tokens = gr.Number(label="Max Tokens", interactive=True,
-							minimum=0, precision=0, step=1)
-						max_tokens.change(None, inputs=max_tokens, outputs=None, 
-							js='(x) =&gt; saveItem("max_tokens", x)', show_progress="hidden")
+					max_tokens = gr.Number(label="Max Tokens", interactive=True,
+						minimum=0, precision=0, step=1)
+					max_tokens.change(None, inputs=max_tokens, outputs=None, 
+						js='(x) =&gt; saveItem("max_tokens", x)', show_progress="hidden")
 
-						temperature = gr.Slider(label="Temperature", interactive=True,
-							minimum=0.0, maximum=1.0, step=0.1)
-						temperature.change(None, inputs=temperature, outputs=None, 
-							js='(x) =&gt; saveItem("temperature", x)', show_progress="hidden")
+					temperature = gr.Slider(label="Temperature", interactive=True,
+						minimum=0.0, maximum=1.0, step=0.1)
+					temperature.change(None, inputs=temperature, outputs=None, 
+						js='(x) =&gt; saveItem("temperature", x)', show_progress="hidden")
 
-						save_chat_history_to_url = gr.Checkbox(label="Save Chat History to URL", interactive=True)
+					save_chat_history_to_url = gr.Checkbox(label="Save Chat History to URL", interactive=True)
 
-						setting_items = [platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, 
-							temperature, save_chat_history_to_url]
-						reset_button = gr.Button("Reset Settings")
-						reset_button.click(None, inputs=None, outputs=setting_items, 
-							js="() =&gt; resetSettings()", show_progress="hidden")
+					setting_items = [platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, 
+						temperature, save_chat_history_to_url]
+					reset_button = gr.Button("Reset Settings")
+					reset_button.click(None, inputs=None, outputs=setting_items, 
+						js="() =&gt; resetSettings()", show_progress="hidden")
 
 			with gr.TabItem("Chat"):
 				with gr.Row():
@@ -827,18 +859,128 @@ def main():
 						pdf_file.upload(update_context_element, inputs=pdf_file, outputs=[context, char_counter])
 						pdf_file.clear(lambda: None, inputs=None, outputs=context, show_progress="hidden")
 
-						(context.change(count_characters, inputs=context, outputs=char_counter, show_progress="hidden")
-							.then(create_search_engine, inputs=context, outputs=None))
+						context.change(
+								count_characters, inputs=context, outputs=char_counter, show_progress="hidden"
+							).then(
+								create_search_engine, inputs=context, outputs=None
+							)
 
 					with gr.Column(scale=2):
-						chatbot = gr.Chatbot(
-							CHAT_HISTORY,
-							elem_id="chatbot", render=False, height=500, show_copy_button=True,
-							sanitize_html=False, render_markdown=False, likeable=False, layout="bubble",
-							avatar_images=[None, Path("robot.png")])
 
-						chat_message_textbox = gr.Textbox(placeholder="Type a message...", 
-							render=False, container=False, interactive=True, scale=7)
+						additional_inputs = [context, platform, endpoint, azure_deployment, azure_api_version, api_key, 
+							model_name, max_tokens, temperature]
+
+						with gr.Blocks() as chat:
+							gr.Markdown(f"# Chat with your PDF")
+
+							with gr.Column(variant="panel"):
+								chatbot = gr.Chatbot(
+									CHAT_HISTORY,
+									elem_id="chatbot", height=500, show_copy_button=True,
+									sanitize_html=False, render_markdown=False, likeable=False, layout="bubble",
+									avatar_images=[None, Path("robot.png")])
+
+								message_state = gr.State()
+								chatbot_state = gr.State(chatbot.value) if chatbot.value else gr.State([])
+
+								with gr.Group():
+									with gr.Row():
+										message_textbox = gr.Textbox(placeholder="Type a message...", 
+											container=False, show_label=False, interactive=True, scale=7)
+
+										submit_button = gr.Button("Submit", variant="primary", scale=1, min_width=150)
+										stop_button = gr.Button("Stop", variant="stop", visible=False, scale=1, min_width=150)
+
+								cost_info = gr.Textbox(elem_id="cost_info", label="Cost", 
+									value=get_cost_info(0),
+									lines=1, max_lines=1, interactive=False, container=False, elem_classes="cost_info")
+
+								with gr.Row():
+									retry_button = gr.Button("🔄 Retry", variant="secondary", size="sm")
+									undo_button = gr.Button("↩️ Undo", variant="secondary", size="sm")
+									clear_button = gr.Button("🗑️ Clear", variant="secondary", size="sm")
+
+							def estimate_message_cost(prompt, history, context):
+								token_count = 0
+								messages = get_openai_messages(prompt, history, context)
+								for message in messages:
+									tokens = OPENAI_TOKENIZER.encode(message["content"])
+									token_count += len(tokens)
+
+								return gr.update(value=get_cost_info(token_count))
+
+							message_textbox.change(estimate_message_cost, inputs=[message_textbox, chatbot, context], outputs=cost_info, show_progress="hidden")
+
+							example_title_textbox = gr.Textbox(visible=False, interactive=True)
+							gr.Examples([[k] for k, v in examples.items()], 
+								inputs=example_title_textbox, outputs=message_textbox, 
+								fn=lambda title: examples[title], run_on_click=True)
+
+						def append_message_to_history(message, history):
+							history.append([message, None])
+							return history, history
+
+						def undo_chat(history):
+							if history:
+								message, _ = history.pop()
+								message = message or ""
+							else:
+								message = ""
+							return history, history, message
+
+						async def submit_message(message, history_with_input, *args):
+							history = history_with_input[:-1]
+							inputs = [message, history]
+							inputs.extend(args)
+
+							generator = process_prompt(*inputs)
+
+							try:
+								first_response, message_cost = await gr.utils.async_iteration(generator)
+								update = history + [[message, first_response]]
+								yield update, update, get_cost_info(message_cost)
+							except StopIteration:
+								update = history + [[message, None]]
+								yield update, update, get_cost_info(message_cost)
+
+							async for response, message_cost in generator:
+								update = history + [[message, response]]
+								yield update, update, get_cost_info(message_cost)
+
+						submit_triggers = [message_textbox.submit, submit_button.click]
+
+						submit_event = gr.events.on(submit_triggers, lambda message: ("", message),
+								inputs=[message_textbox], outputs=[message_textbox, message_state], queue=False
+							).then(
+								append_message_to_history, inputs=[message_state, chatbot_state], outputs=[chatbot, chatbot_state], queue=False
+							).then(
+								submit_message, inputs=[message_state, chatbot_state] + additional_inputs, outputs=[chatbot, chatbot_state, cost_info]
+							)
+
+						for submit_trigger in submit_triggers:
+							submit_trigger(lambda: (gr.update(visible=False), gr.update(visible=True)), 
+								inputs=None, outputs=[submit_button, stop_button], queue=False)
+							submit_event.then(lambda: (gr.update(visible=True), gr.update(visible=False)),
+								inputs=None, outputs=[submit_button, stop_button], queue=False)
+
+						stop_button.click(None, inputs=None, outputs=None, cancels=submit_event)
+
+						retry_button.click(
+								undo_chat, inputs=[chatbot_state], outputs=[chatbot, chatbot_state, message_state], queue=False
+							).then(
+								append_message_to_history, inputs=[message_state, chatbot_state], outputs=[chatbot, chatbot_state], queue=False
+							).then(
+								submit_message, inputs=[message_state, chatbot_state] + additional_inputs, outputs=[chatbot, chatbot_state, cost_info]
+							)
+
+						undo_button.click(
+								undo_chat, inputs=[chatbot_state], outputs=[chatbot, chatbot_state, message_state], queue=False
+							).then(
+								lambda message: message, inputs=message_state, outputs=message_textbox, queue=False
+							)
+
+						clear_button.click(lambda: ([], [], None), inputs=None, outputs=[chatbot, chatbot_state, message_state], 
+							queue=False)
 
 						chatbot.change(None, inputs=[chatbot, save_chat_history_to_url], outputs=None, 
 							# チャット履歴をクエリパラメータに保存する。
@@ -846,19 +988,6 @@ def main():
 
 						save_chat_history_to_url.change(None, inputs=[chatbot, save_chat_history_to_url], outputs=None, 
 							js=save_or_delete_chat_history, show_progress="hidden")
-
-						chat = gr.ChatInterface(process_prompt, 
-							title="Chat with your PDF", 
-							chatbot=chatbot, 
-							textbox=chat_message_textbox, 
-							additional_inputs=[context, platform, endpoint, azure_deployment, azure_api_version, api_key, 
-								model_name, max_tokens, temperature], 
-							examples=None)
-
-						example_title_textbox = gr.Textbox(visible=False, interactive=True)
-						gr.Examples([[k] for k, v in examples.items()], 
-							inputs=example_title_textbox, outputs=chat_message_textbox, 
-							fn=lambda title: examples[title], run_on_click=True)
 
 		app.load(None, inputs=None, outputs=setting_items, 
 			js=js_define_utilities_and_load_settings, show_progress="hidden")
