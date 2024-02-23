@@ -734,7 +734,7 @@ def main():
 * 検索するページ数: 3
 * 回答方法: 
   - 検索結果の情報のみを用いて回答すること。
-  - 回答に利用した文章のあるページ番号を最後に出力すること。形式: "参考ページ番号: 71, 59, 47"
+  - 回答に利用した文章のあるページ番号を、それぞれの回答文の文末に付与すること。形式: "（参考ページ番号: 71, 59, 47）"
   - 回答に役立つ情報が検索結果内にない場合は「検索結果には回答に役立つ情報がありませんでした。」と回答すること。
 * 回答の言語: 日本語
 
@@ -750,7 +750,7 @@ def main():
 * 検索するページ数: 3
 * 回答方法: 
   - 検索結果の情報のみを用いて回答すること。
-  - 回答に利用した文章のあるページ番号を最後に出力すること。形式: "参考ページ番号: 71, 59, 47"
+  - 回答に利用した文章のあるページ番号を、それぞれの回答文の文末に付与すること。形式: "（参考ページ番号: 71, 59, 47）"
   - 回答に役立つ情報が検索結果内にない場合は「検索結果には回答に役立つ情報がありませんでした。」と回答すること。
 * 回答の言語: 日本語
 
@@ -883,7 +883,7 @@ def main():
 								with gr.Group():
 									with gr.Row():
 										message_textbox = gr.Textbox(placeholder="Type a message...", 
-											container=False, show_label=False, interactive=True, scale=7)
+											container=False, show_label=False, autofocus=True, interactive=True, scale=7)
 
 										submit_button = gr.Button("Submit", variant="primary", scale=1, min_width=150)
 										stop_button = gr.Button("Stop", variant="stop", visible=False, scale=1, min_width=150)
