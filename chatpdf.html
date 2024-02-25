@@ -629,6 +629,20 @@ def get_cost_info(prompt_token_count):
 	return f"Estimated input cost: {prompt_token_count + CHAT_TOOLS_TOKENS:,} tokens,  Actual total input cost: {actual_total_cost_prompt:,} tokens,  Actual total output cost: {actual_total_cost_completion:,} tokens"
 
 
+# デフォルト設定値
+DEFAULT_SETTINGS = {
+        "setting_name": "Default", 
+        "platform": "OpenAI", 
+        "endpoint": "https://api.openai.com/v1", 
+        "azure_deployment": "", 
+        "azure_api_version": "", 
+        "model_name": "gpt-4-turbo-preview", 
+        "max_tokens": 4096, 
+        "temperature": 0.2, 
+        "save_chat_history_to_url": False
+    };
+
+
 def main():
 	"""
 	アプリケーションのメイン関数。Gradioインターフェースを設定し、アプリケーションを起動する。
@@ -654,22 +668,39 @@ def main():
 						return defaultValue;
 					}
 				};
+""" + "".join([f"""
+				const default_{setting_key} = {json.dumps(default_value, ensure_ascii=False)};
+				const {setting_key} = getItem("{setting_key}", default_{setting_key});
+""" for setting_key, default_value in DEFAULT_SETTINGS.items()]) + """
+				const serialized_saved_settings = getItem("saved_settings", []);
+				const default_saved_settings = [[
+""" + ", ".join([f"{json.dumps(default_value, ensure_ascii=False)}" for _, default_value in DEFAULT_SETTINGS.items()]) + """
+				]];
 
-				const platform = getItem("platform", "OpenAI");
-				const endpoint = getItem("endpoint", "https://api.openai.com/v1");
-				const azure_deployment = getItem("azure_deployment", "");
-				const azure_api_version = getItem("azure_api_version", "");
-				const model_name = getItem("model_name", "gpt-4-turbo-preview");
-				const max_tokens = getItem("max_tokens", 4096);
-				const temperature = getItem("temperature", 0.2);
-				const save_chat_history_to_url = getItem("save_chat_history_to_url", false);
+				saved_settings = [];
+				for (let entry of serialized_saved_settings) {
+					saved_settings.push([
+							entry["setting_name"] || "", 
+							entry["platform"] || default_platform, 
+							entry["endpoint"] || default_endpoint, 
+							entry["azure_deployment"] || default_azure_deployment, 
+							entry["azure_api_version"] || default_azure_api_version, 
+							entry["model_name"] || default_model_name, 
+							entry["max_tokens"] || default_max_tokens, 
+							entry["temperature"] || default_temperature, 
+							entry["save_chat_history_to_url"] || default_save_chat_history_to_url
+						]);
+				}
+				if (saved_settings.length == 0) {
+					saved_settings = default_saved_settings;
+				}
 
-				return [platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, save_chat_history_to_url];
+				return [setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, save_chat_history_to_url, saved_settings];
 			};
 
 			globalThis.resetSettings = () =&gt; {
 				for (let key in localStorage) {
-					if (key.startsWith(KEY_PREFIX)) {
+					if (key.startsWith(KEY_PREFIX) && !key.startsWith(KEY_PREFIX + "saved_settings") && !key.startsWith(KEY_PREFIX + "setting_name")) {
 						localStorage.removeItem(key);
 					}
 				}
@@ -822,56 +853,181 @@ def main():
 		with gr.Tabs():
 			with gr.TabItem("Settings"):
 				with gr.Column():
-					platform = gr.Radio(label="Platform", interactive=True, 
-						choices=["OpenAI", "Azure"], value="OpenAI")
-					platform.change(None, inputs=platform, outputs=None, 
-						js='(x) =&gt; saveItem("platform", x)', show_progress="hidden")
-
-					with gr.Row():
-						endpoint = gr.Textbox(label="Endpoint", interactive=True)
-						endpoint.change(None, inputs=endpoint, outputs=None, 
-							js='(x) =&gt; saveItem("endpoint", x)', show_progress="hidden")
-
-						azure_deployment = gr.Textbox(label="Azure Deployment", interactive=True)
-						azure_deployment.change(None, inputs=azure_deployment, outputs=None, 
-							js='(x) =&gt; saveItem("azure_deployment", x)', show_progress="hidden")
-
-						azure_api_version = gr.Textbox(label="Azure API Version", interactive=True)
-						azure_api_version.change(None, inputs=azure_api_version, outputs=None, 
-							js='(x) =&gt; saveItem("azure_api_version", x)', show_progress="hidden")
-
-					with gr.Group():
+					with gr.Column(variant="panel"):
 						with gr.Row():
-							api_key_file = gr.File(file_count="single", file_types=["text"], 
-								height=80, label="API Key File")
-							api_key = gr.Textbox(label="API Key", type="password", interactive=True)
-							# 注意: 秘密情報をlocalStorageに保存してはならない。他者に秘密情報が盗まれる危険性があるからである。
+							setting_name = gr.Textbox(label="Setting Name", value="Default", interactive=True)
+							setting_name.change(None, inputs=setting_name, outputs=None, 
+								js='(x) =&gt; saveItem("setting_name", x)', show_progress="hidden")
 
-							api_key_file.upload(load_api_key, inputs=api_key_file, outputs=api_key, 
-								show_progress="hidden")
-							api_key_file.clear(lambda: None, inputs=None, outputs=api_key, show_progress="hidden")
+						with gr.Row():
+							platform = gr.Radio(label="Platform", interactive=True, 
+								choices=["OpenAI", "Azure"], value="OpenAI")
+							platform.change(None, inputs=platform, outputs=None, 
+								js='(x) =&gt; saveItem("platform", x)', show_progress="hidden")
 
-					model_name = gr.Textbox(label="model", interactive=True)
-					model_name.change(None, inputs=model_name, outputs=None, 
-						js='(x) =&gt; saveItem("model_name", x)', show_progress="hidden")
+						with gr.Row():
+							endpoint = gr.Textbox(label="Endpoint", interactive=True)
+							endpoint.change(None, inputs=endpoint, outputs=None, 
+								js='(x) =&gt; saveItem("endpoint", x)', show_progress="hidden")
 
-					max_tokens = gr.Number(label="Max Tokens", interactive=True,
-						minimum=0, precision=0, step=1)
-					max_tokens.change(None, inputs=max_tokens, outputs=None, 
-						js='(x) =&gt; saveItem("max_tokens", x)', show_progress="hidden")
+							azure_deployment = gr.Textbox(label="Azure Deployment", interactive=True)
+							azure_deployment.change(None, inputs=azure_deployment, outputs=None, 
+								js='(x) =&gt; saveItem("azure_deployment", x)', show_progress="hidden")
 
-					temperature = gr.Slider(label="Temperature", interactive=True,
-						minimum=0.0, maximum=1.0, step=0.1)
-					temperature.change(None, inputs=temperature, outputs=None, 
-						js='(x) =&gt; saveItem("temperature", x)', show_progress="hidden")
+							azure_api_version = gr.Textbox(label="Azure API Version", interactive=True)
+							azure_api_version.change(None, inputs=azure_api_version, outputs=None, 
+								js='(x) =&gt; saveItem("azure_api_version", x)', show_progress="hidden")
 
-					save_chat_history_to_url = gr.Checkbox(label="Save Chat History to URL", interactive=True)
+						with gr.Group():
+							with gr.Row():
+								api_key_file = gr.File(file_count="single", file_types=["text"], 
+									height=80, label="API Key File")
+								api_key = gr.Textbox(label="API Key", type="password", interactive=True)
+								# 注意: 秘密情報をlocalStorageに保存してはならない。他者に秘密情報が盗まれる危険性があるからである。
 
-					setting_items = [platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, 
-						temperature, save_chat_history_to_url]
-					reset_button = gr.Button("Reset Settings")
-					reset_button.click(None, inputs=None, outputs=setting_items, 
-						js="() =&gt; resetSettings()", show_progress="hidden")
+								api_key_file.upload(load_api_key, inputs=api_key_file, outputs=api_key, 
+									show_progress="hidden")
+								api_key_file.clear(lambda: None, inputs=None, outputs=api_key, show_progress="hidden")
+
+						with gr.Row():
+							model_name = gr.Textbox(label="Model", interactive=True)
+							model_name.change(None, inputs=model_name, outputs=None, 
+								js='(x) =&gt; saveItem("model_name", x)', show_progress="hidden")
+
+							max_tokens = gr.Number(label="Max Tokens", interactive=True,
+								minimum=0, precision=0, step=1)
+							max_tokens.change(None, inputs=max_tokens, outputs=None, 
+								js='(x) =&gt; saveItem("max_tokens", x)', show_progress="hidden")
+
+							temperature = gr.Slider(label="Temperature", interactive=True,
+								minimum=0.0, maximum=1.0, step=0.1)
+							temperature.change(None, inputs=temperature, outputs=None, 
+								js='(x) =&gt; saveItem("temperature", x)', show_progress="hidden")
+
+						save_chat_history_to_url = gr.Checkbox(label="Save Chat History to URL", interactive=True)
+
+						reset_button = gr.Button("Reset Settings")
+
+					with gr.Column(variant="panel"):
+						default_saved_settings = list(DEFAULT_SETTINGS.values())
+
+						saved_settings_df = gr.Dataframe(
+								elem_id="saved_settings",
+								value=[default_saved_settings], 
+								headers=["Name", "Platform", "Endpoint", "Azure Deployment", "Azure API Version", "Model", "Max Tokens", "Temperature", "Save Chat History to URL"],
+								row_count=(0, "dynamic"),
+								col_count=(9, "fixed"),
+								datatype=["str", "str", "str", "str", "str", "str", "number", "number", "bool"],
+								type="array",
+								label="Saved Settings",
+								show_label=True,
+								interactive=False
+							)
+						selected_setting = gr.State(None)
+						temp_selected_row_index = gr.JSON(value=None, visible=False)
+
+
+						def select_setting(event: gr.SelectData):
+							return (event.index[0], event.index[1]), event.index[0]
+
+
+						saved_settings_df.select(
+								select_setting, inputs=None, outputs=[selected_setting, temp_selected_row_index], queue=False, show_progress="hidden"
+							).then(
+								None, inputs=temp_selected_row_index, outputs=None, js='(row_index) =&gt; { for (let e of document.querySelectorAll("#saved_settings > div > div > button > svelte-virtual-table-viewport > table > tbody > tr")[row_index].children) { e.classList.add("focus"); } }', queue=False, show_progress="hidden"
+							)
+
+						with gr.Row():
+							load_saved_settings_button = gr.Button("Load")
+							append_or_overwrite_saved_settings_button = gr.Button("Append or Overwrite")
+							delete_saved_settings_button = gr.Button("Delete")
+
+						serialized_saved_settings_state = gr.JSON(visible=False)
+
+
+						def load_saved_setting(saved_settings, selected_setting):
+							if not selected_setting:
+								return saved_settings
+
+							def u(x):
+								return gr.update(value=x, interactive=True)
+
+							row_index = selected_setting[0]
+
+							setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, save_chat_history_to_url = saved_settings[row_index]
+
+							return u(setting_name), u(platform), u(endpoint), u(azure_deployment), u(azure_api_version), u(model_name), u(max_tokens), u(temperature), u(save_chat_history_to_url), None
+
+
+						load_saved_settings_button.click(load_saved_setting, inputs=[saved_settings_df, selected_setting], outputs=[setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, save_chat_history_to_url, selected_setting], queue=False, show_progress="hidden")
+
+
+						def append_or_overwrite_setting(saved_settings, setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, save_chat_history_to_url):
+
+							setting_name = setting_name.strip()
+
+							found = False
+							new_saved_settings = []
+							for entry in saved_settings:
+								if entry[0] == setting_name:
+									new_saved_settings.append([setting_name, platform, endpoint, azure_deployment, azure_api_version,model_name, max_tokens, temperature, save_chat_history_to_url])
+									found = True
+								else:
+									new_saved_settings.append(entry)
+
+							if not found:
+								new_saved_settings.append([setting_name, platform, endpoint, azure_deployment, azure_api_version,model_name, max_tokens, temperature, save_chat_history_to_url])
+
+							return new_saved_settings, None
+
+
+						def serialize_saved_settings(saved_settings):
+							serialization_keys = list(DEFAULT_SETTINGS.keys())
+
+							serialized_saved_settings = [
+									{ k: entry[i] for i, k in enumerate(serialization_keys) } 
+									for entry in saved_settings
+								]
+							return serialized_saved_settings
+
+
+						append_or_overwrite_saved_settings_button.click(
+								append_or_overwrite_setting, inputs=[saved_settings_df, setting_name, platform, endpoint, azure_deployment, azure_api_version,model_name, max_tokens, temperature, save_chat_history_to_url], outputs=[saved_settings_df, selected_setting], queue=False, show_progress="hidden"
+							).then(
+								serialize_saved_settings, inputs=saved_settings_df, outputs=serialized_saved_settings_state, queue=False, show_progress="hidden",
+							).then(
+								None, inputs=serialized_saved_settings_state, outputs=None, js='(x) =&gt; saveItem("saved_settings", x)', queue=False, show_progress="hidden"
+							)
+
+
+						def delete_setting(saved_settings, selected_setting):
+							if not selected_setting:
+								return saved_settings
+
+							row_index = selected_setting[0]
+							new_saved_settings = saved_settings[0:row_index] + saved_settings[row_index + 1:]
+
+							if not new_saved_settings:
+								new_saved_settings.append(default_saved_settings)
+
+							return new_saved_settings, None
+
+
+						delete_saved_settings_button.click(
+								delete_setting, inputs=[saved_settings_df, selected_setting], outputs=[saved_settings_df, selected_setting], queue=False, show_progress="hidden"
+							).then(
+								serialize_saved_settings, inputs=saved_settings_df, outputs=serialized_saved_settings_state, queue=False, show_progress="hidden",
+							).then(
+								None, inputs=serialized_saved_settings_state, outputs=None, js='(x) =&gt; saveItem("saved_settings", x)', queue=False, show_progress="hidden"
+							)
+						
+						temp_saved_settings = gr.JSON(visible=False)
+						temp_saved_settings.change(lambda x: x, inputs=temp_saved_settings, outputs=saved_settings_df, queue=False, show_progress="hidden")
+
+						setting_items = [setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, 
+							temperature, save_chat_history_to_url, temp_saved_settings]
+						reset_button.click(None, inputs=None, outputs=setting_items, 
+							js="() =&gt; resetSettings()", show_progress="hidden")
 
 			with gr.TabItem("Chat"):
 				with gr.Row():
