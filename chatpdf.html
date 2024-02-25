@@ -85,7 +85,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 await micropip.install("https://raw.githubusercontent.com/sonoisa/pyodide_wheels/main/tiktoken/tiktoken-0.5.1-cp311-cp311-emscripten_3_1_45_wasm32.whl", keep_going=True)
 
 
-import inspect
 import gradio as gr
 import base64
 import json
@@ -361,6 +360,7 @@ def load_pages(page_numbers):
 	return found_pages
 
 
+# function calling用ツール
 CHAT_TOOLS = [
 	# ページ検索
 	{
@@ -409,10 +409,22 @@ CHAT_TOOLS = [
 	}
 ]
 
+# function callingなど、固定で消費するトークン数
 CHAT_TOOLS_TOKENS = 139
 
 
 def get_openai_messages(prompt, history, context):
+	"""
+	与えられた対話用データを、ChatGPT APIの入力に用いられるメッセージデータ形式に変換して返す。
+
+	Args:
+		prompt (str): ユーザーからの入力プロンプト
+		history (list[list[str]]): チャット履歴
+		context (str): チャットコンテキスト
+
+	Returns:
+		str: ChatGPT APIの入力に用いられるメッセージデータ
+	"""
 	global SEARCH_ENGINE
 	if SEARCH_ENGINE is not None:
 		context = "".join([page.content for page in SEARCH_ENGINE.pages])
@@ -430,7 +442,10 @@ def get_openai_messages(prompt, history, context):
 	return messages
 
 
+# それまでの全入力トークン数
 actual_total_cost_prompt = 0
+
+# それまでの全出力トークン数
 actual_total_cost_completion = 0
 
 
@@ -440,7 +455,7 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 
 	Args:
 		prompt (str): ユーザーからの入力プロンプト
-		history (list): チャット履歴
+		history (list[list[str]]): チャット履歴
 		context (str): チャットコンテキスト
 		platform (str): 使用するAIプラットフォーム
 		endpoint (str): AIサービスのエンドポイント
@@ -602,6 +617,15 @@ def load_api_key(file_obj):
 
 
 def get_cost_info(prompt_token_count):
+	"""
+	チャットのトークン数情報を表示するための文字列を返す。
+
+	Args:
+		prompt_token_count (int): プロンプト（履歴込み）のトークン数
+
+	Returns:
+		str: チャットのトークン数情報を表示するための文字列
+	"""	
 	return f"Estimated input cost: {prompt_token_count + CHAT_TOOLS_TOKENS:,} tokens,  Actual total input cost: {actual_total_cost_prompt:,} tokens,  Actual total output cost: {actual_total_cost_completion:,} tokens"
 
 
@@ -859,8 +883,8 @@ def main():
 						char_counter = gr.Textbox(label="Statistics", value=get_context_info("", []), 
 							lines=2, max_lines=2, interactive=False, container=True)
 
-						pdf_file.upload(update_context_element, inputs=pdf_file, outputs=[context, char_counter])
-						pdf_file.clear(lambda: None, inputs=None, outputs=context, show_progress="hidden")
+						pdf_file.upload(update_context_element, inputs=pdf_file, outputs=[context, char_counter], queue=False)
+						pdf_file.clear(lambda: None, inputs=None, outputs=context, queue=False, show_progress="hidden")
 
 					with gr.Column(scale=2):
 
@@ -905,7 +929,7 @@ def main():
 
 								return gr.update(value=get_cost_info(token_count))
 
-							message_textbox.change(estimate_message_cost, inputs=[message_textbox, chatbot, context], outputs=cost_info, show_progress="hidden")
+							message_textbox.change(estimate_message_cost, inputs=[message_textbox, chatbot, context], outputs=cost_info, queue=False, show_progress="hidden")
 
 							example_title_textbox = gr.Textbox(visible=False, interactive=True)
 							gr.Examples([[k] for k, v in examples.items()], 
@@ -931,16 +955,14 @@ def main():
 
 							generator = process_prompt(*inputs)
 
-							try:
-								first_response = await gr.utils.async_iteration(generator)
-								update = history + [[message, first_response]]
-								yield update, update
-							except StopIteration:
-								update = history + [[message, None]]
+							has_response = False
+							async for response in generator:
+								has_response = True
+								update = history + [[message, response]]
 								yield update, update
 
-							async for response in generator:
-								update = history + [[message, response]]
+							if not has_response:
+								update = history + [[message, None]]
 								yield update, update
 
 						submit_triggers = [message_textbox.submit, submit_button.click]
@@ -990,13 +1012,13 @@ def main():
 
 						chatbot.change(None, inputs=[chatbot, save_chat_history_to_url], outputs=None, 
 							# チャット履歴をクエリパラメータに保存する。
-							js=save_or_delete_chat_history, show_progress="hidden")
+							js=save_or_delete_chat_history, queue=False, show_progress="hidden")
 
 						save_chat_history_to_url.change(None, inputs=[chatbot, save_chat_history_to_url], outputs=None, 
-							js=save_or_delete_chat_history, show_progress="hidden")
+							js=save_or_delete_chat_history, queue=False, show_progress="hidden")
 
 						context.change(
-								count_characters, inputs=context, outputs=char_counter, show_progress="hidden"
+								count_characters, inputs=context, outputs=char_counter, queue=False, show_progress="hidden"
 							).then(
 								create_search_engine, inputs=context, outputs=None
 							).then(
