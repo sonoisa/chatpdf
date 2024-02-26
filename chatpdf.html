@@ -1,3 +1,4 @@
+<!DOCTYPE html>
 <!--
 Copyright (c) 2024 Isao Sonobe
 Released under the MIT license
@@ -27,9 +28,62 @@ https://opensource.org/license/mit/
 				min-height: 500px;
 			}
 
+			#chatbot h1 {
+				font-size: 2em;
+				margin-block-start: 0.67em;
+				margin-block-end: 0em;
+				margin-inline-start: 0px;
+				margin-inline-end: 0px;
+				font-weight: bold;			
+			}
+
+			#chatbot h2 {
+				font-size: 1.5em;
+				margin-block-start: 0.83em;
+				margin-block-end: 0em;
+				margin-inline-start: 0px;
+				margin-inline-end: 0px;
+				font-weight: bold;
+			}
+
+			#chatbot h3 {
+				font-size: 1.17em;
+				margin-block-start: 1em;
+				margin-block-end: 0em;
+				margin-inline-start: 0px;
+				margin-inline-end: 0px;
+				font-weight: bold;
+   			}
+
+   			#chatbot h4 {
+				margin-block-start: 1.33em;
+				margin-block-end: 0em;
+				margin-inline-start: 0px;
+				margin-inline-end: 0px;
+				font-weight: bold;
+			}
+
+   			#chatbot h5 {
+				margin-block-start: 1.67em;
+				margin-block-end: 0em;
+				margin-inline-start: 0px;
+				margin-inline-end: 0px;
+				font-weight: bold;
+			}
+
+   			#chatbot h6 {
+				margin-block-start: 1.83em;
+				margin-block-end: 0em;
+				margin-inline-start: 0px;
+				margin-inline-end: 0px;
+				font-weight: bold;   			
+			}
+
+			/* 
 			.chatbot {
 				white-space: pre-wrap;
 			}
+			*/
 
 			.gallery-item > .gallery {
 				max-width: 380px;
@@ -216,6 +270,32 @@ def extract_pages_from_page_tag(document_with_page_tag):
 	matches = re.findall(page_tag_pattern, document_with_page_tag, re.DOTALL)
 	pages = [Page(number=int(number), content=content) for number, content in matches]
 	return pages
+
+
+def escape_latex(unescaped_text):
+	"""
+	Chatbotのmarkdownで数式が表示されるように \\(, \\), \\[, \\] をバックスラッシュでエスケープする。
+
+	Args:
+		unescaped_text (str): エスケープ対象文字列
+
+	Returns:
+		str: エスケープされた文字列
+	"""
+	return re.sub(r"(\\[\(\)\[\]])", r"\\\1", unescaped_text)
+
+
+def unescape_latex(escaped_text):
+	"""
+	Chatbotのmarkdownで数式が表示されるようにエスケープされていた \\(, \\), \\[, \\] をエスケープされていない元の括弧に変換する。
+
+	Args:
+		escaped_text (str): エスケープされた文字列
+
+	Returns:
+		str: エスケープされていない文字列
+	"""
+	return re.sub(r"\\(\\[\(\)\[\]])", r"\1", escaped_text)
 
 
 def add_s(values):
@@ -432,7 +512,9 @@ def get_openai_messages(prompt, history, context):
 	messages = []
 	for user_message, assistant_message in history:
 		if user_message is not None and assistant_message is not None:
+			user_message = unescape_latex(user_message)
 			user_message = user_message.replace("{context}", context)
+			assistant_message = unescape_latex(assistant_message)
 			messages.append({ "role": "user", "content": user_message })
 			messages.append({ "role": "assistant", "content": assistant_message })
 
@@ -598,7 +680,6 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 			raise gr.Error(str(e))
 
 
-
 def load_api_key(file_obj):
 	"""
 	APIキーファイルからAPIキーを読み込む。
@@ -631,16 +712,16 @@ def get_cost_info(prompt_token_count):
 
 # デフォルト設定値
 DEFAULT_SETTINGS = {
-        "setting_name": "Default", 
-        "platform": "OpenAI", 
-        "endpoint": "https://api.openai.com/v1", 
-        "azure_deployment": "", 
-        "azure_api_version": "", 
-        "model_name": "gpt-4-turbo-preview", 
-        "max_tokens": 4096, 
-        "temperature": 0.2, 
-        "save_chat_history_to_url": False
-    };
+		"setting_name": "Default", 
+		"platform": "OpenAI", 
+		"endpoint": "https://api.openai.com/v1", 
+		"azure_deployment": "", 
+		"azure_api_version": "", 
+		"model_name": "gpt-4-turbo-preview", 
+		"max_tokens": 4096, 
+		"temperature": 0.2, 
+		"save_chat_history_to_url": False
+	};
 
 
 def main():
@@ -1054,7 +1135,14 @@ def main():
 								chatbot = gr.Chatbot(
 									CHAT_HISTORY,
 									elem_id="chatbot", height=500, show_copy_button=True,
-									sanitize_html=False, render_markdown=False, likeable=False, layout="bubble",
+									sanitize_html=True, render_markdown=True, 
+									latex_delimiters=[
+											# { "left": "$$", "right": "$$", "display": True }, 
+											# { "left": "$", "right": "$", "display": False }, 
+											{ "left": "\\(", "right": "\\)", "display": False }, 
+											{ "left": "\\[", "right": "\\]", "display": True }, 
+										], 
+									likeable=False, layout="bubble",
 									avatar_images=[None, Path("robot.png")])
 
 								message_state = gr.State()
@@ -1076,6 +1164,7 @@ def main():
 									undo_button = gr.Button("↩️ Undo", variant="secondary", size="sm")
 									clear_button = gr.Button("🗑️ Clear", variant="secondary", size="sm")
 
+
 							def estimate_message_cost(prompt, history, context):
 								token_count = 0
 								messages = get_openai_messages(prompt, history, context)
@@ -1085,6 +1174,7 @@ def main():
 
 								return gr.update(value=get_cost_info(token_count))
 
+
 							message_textbox.change(estimate_message_cost, inputs=[message_textbox, chatbot, context], outputs=cost_info, queue=False, show_progress="hidden")
 
 							example_title_textbox = gr.Textbox(visible=False, interactive=True)
@@ -1092,9 +1182,12 @@ def main():
 								inputs=example_title_textbox, outputs=message_textbox, 
 								fn=lambda title: examples[title], run_on_click=True)
 
+
 						def append_message_to_history(message, history):
+							message = escape_latex(message)
 							history.append([message, None])
 							return history, history
+
 
 						def undo_chat(history):
 							if history:
@@ -1102,7 +1195,8 @@ def main():
 								message = message or ""
 							else:
 								message = ""
-							return history, history, message
+							return history, history, unescape_latex(message)
+
 
 						async def submit_message(message, history_with_input, *args):
 							history = history_with_input[:-1]
@@ -1110,10 +1204,12 @@ def main():
 							inputs.extend(args)
 
 							generator = process_prompt(*inputs)
+							message = escape_latex(message)
 
 							has_response = False
 							async for response in generator:
 								has_response = True
+								response = escape_latex(response)
 								update = history + [[message, response]]
 								yield update, update
 
@@ -1121,10 +1217,11 @@ def main():
 								update = history + [[message, None]]
 								yield update, update
 
+
 						submit_triggers = [message_textbox.submit, submit_button.click]
 
-						submit_event = gr.events.on(submit_triggers, lambda message: ("", message),
-								inputs=[message_textbox], outputs=[message_textbox, message_state], queue=False
+						submit_event = gr.events.on(
+								submit_triggers, lambda message: ("", message), inputs=[message_textbox], outputs=[message_textbox, message_state], queue=False
 							).then(
 								append_message_to_history, inputs=[message_state, chatbot_state], outputs=[chatbot, chatbot_state], queue=False
 							).then(
@@ -1181,8 +1278,7 @@ def main():
 								estimate_message_cost, inputs=[message_textbox, chatbot, context], outputs=cost_info, show_progress="hidden"
 							)
 
-		app.load(None, inputs=None, outputs=setting_items, 
-			js=js_define_utilities_and_load_settings, show_progress="hidden")
+		app.load(None, inputs=None, outputs=setting_items, js=js_define_utilities_and_load_settings, show_progress="hidden")
 
 	app.queue().launch()
 
