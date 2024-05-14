@@ -553,7 +553,7 @@ actual_total_cost_prompt = 0
 actual_total_cost_completion = 0
 
 
-async def process_prompt(prompt, history, context, platform, endpoint, azure_deployment, azure_api_version, api_key, model_name, max_tokens, temperature):
+async def process_prompt(prompt, history, context, platform, endpoint, azure_deployment, azure_api_version, api_key, model_name, max_tokens, temperature, enable_rag):
 	"""
 	ユーザーのプロンプトを処理し、ChatGPTによる生成結果を返す。
 
@@ -569,6 +569,7 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 		model_name (str): 使用するAIモデルの名前
 		max_tokens (int): 生成する最大トークン数
 		temperature (float): クリエイティビティの度合いを示す温度パラメータ
+		enable_rag (bool): RAG機能を有効にするかどうか
 
 	Returns:
 		str: ChatGPTによる生成結果
@@ -593,15 +594,24 @@ async def process_prompt(prompt, history, context, platform, endpoint, azure_dep
 					http_client=http_client
 				)
 
-		completion = openai_client.chat.completions.create(
-				messages=messages,
-				model=model_name,
-				max_tokens=max_tokens,
-				temperature=temperature,
-				tools=CHAT_TOOLS,
-				tool_choice="auto",
-				stream=False
-			)
+		if enable_rag:
+			completion = openai_client.chat.completions.create(
+					messages=messages,
+					model=model_name,
+					max_tokens=max_tokens,
+					temperature=temperature,
+					tools=CHAT_TOOLS,
+					tool_choice="auto",
+					stream=False
+				)
+		else:
+			completion = openai_client.chat.completions.create(
+					messages=messages,
+					model=model_name,
+					max_tokens=max_tokens,
+					temperature=temperature,
+					stream=False
+				)
 
 		bot_response = ""
 		if hasattr(completion, "error"):
@@ -742,6 +752,7 @@ DEFAULT_SETTINGS = {
 		"model_name": "gpt-4-turbo-preview", 
 		"max_tokens": 4096, 
 		"temperature": 0.2, 
+		"enable_rag": True,
 		"save_chat_history_to_url": False
 	};
 
@@ -791,6 +802,7 @@ def main():
 							entry["model_name"] || default_model_name, 
 							entry["max_tokens"] || default_max_tokens, 
 							entry["temperature"] || default_temperature, 
+							entry["enable_rag"] || default_enable_rag, 
 							entry["save_chat_history_to_url"] || default_save_chat_history_to_url
 						]);
 				}
@@ -798,7 +810,7 @@ def main():
 					saved_settings = default_saved_settings;
 				}
 
-				return [setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, save_chat_history_to_url, saved_settings];
+				return [setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, enable_rag, save_chat_history_to_url, saved_settings];
 			};
 
 			globalThis.resetSettings = () =&gt; {
@@ -1007,6 +1019,10 @@ def main():
 							temperature.change(None, inputs=temperature, outputs=None, 
 								js='(x) =&gt; saveItem("temperature", x)', show_progress="hidden")
 
+						enable_rag = gr.Checkbox(label="Enable RAG (Retrieval Augmented Generation)", interactive=True)
+						enable_rag.change(None, inputs=enable_rag, outputs=None, 
+							js='(x) =&gt; saveItem("enable_rag", x)', show_progress="hidden")
+
 						save_chat_history_to_url = gr.Checkbox(label="Save Chat History to URL", interactive=True)
 
 						reset_button = gr.Button("Reset Settings")
@@ -1017,10 +1033,10 @@ def main():
 						saved_settings_df = gr.Dataframe(
 								elem_id="saved_settings",
 								value=[default_saved_settings], 
-								headers=["Name", "Platform", "Endpoint", "Azure Deployment", "Azure API Version", "Model", "Max Tokens", "Temperature", "Save Chat History to URL"],
+								headers=["Name", "Platform", "Endpoint", "Azure Deployment", "Azure API Version", "Model", "Max Tokens", "Temperature", "Enable RAG", "Save Chat History to URL"],
 								row_count=(0, "dynamic"),
-								col_count=(9, "fixed"),
-								datatype=["str", "str", "str", "str", "str", "str", "number", "number", "bool"],
+								col_count=(10, "fixed"),
+								datatype=["str", "str", "str", "str", "str", "str", "number", "number", "bool", "bool"],
 								type="array",
 								label="Saved Settings",
 								show_label=True,
@@ -1057,15 +1073,15 @@ def main():
 
 							row_index = selected_setting[0]
 
-							setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, save_chat_history_to_url = saved_settings[row_index]
+							setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, enable_rag, save_chat_history_to_url = saved_settings[row_index]
 
-							return u(setting_name), u(platform), u(endpoint), u(azure_deployment), u(azure_api_version), u(model_name), u(max_tokens), u(temperature), u(save_chat_history_to_url), None
-
-
-						load_saved_settings_button.click(load_saved_setting, inputs=[saved_settings_df, selected_setting], outputs=[setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, save_chat_history_to_url, selected_setting], queue=False, show_progress="hidden")
+							return u(setting_name), u(platform), u(endpoint), u(azure_deployment), u(azure_api_version), u(model_name), u(max_tokens), u(temperature), u(enable_rag), u(save_chat_history_to_url), None
 
 
-						def append_or_overwrite_setting(saved_settings, setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, save_chat_history_to_url):
+						load_saved_settings_button.click(load_saved_setting, inputs=[saved_settings_df, selected_setting], outputs=[setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, enable_rag, save_chat_history_to_url, selected_setting], queue=False, show_progress="hidden")
+
+
+						def append_or_overwrite_setting(saved_settings, setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, enable_rag, save_chat_history_to_url):
 
 							setting_name = setting_name.strip()
 
@@ -1073,13 +1089,13 @@ def main():
 							new_saved_settings = []
 							for entry in saved_settings:
 								if entry[0] == setting_name:
-									new_saved_settings.append([setting_name, platform, endpoint, azure_deployment, azure_api_version,model_name, max_tokens, temperature, save_chat_history_to_url])
+									new_saved_settings.append([setting_name, platform, endpoint, azure_deployment, azure_api_version,model_name, max_tokens, temperature, enable_rag, save_chat_history_to_url])
 									found = True
 								else:
 									new_saved_settings.append(entry)
 
 							if not found:
-								new_saved_settings.append([setting_name, platform, endpoint, azure_deployment, azure_api_version,model_name, max_tokens, temperature, save_chat_history_to_url])
+								new_saved_settings.append([setting_name, platform, endpoint, azure_deployment, azure_api_version,model_name, max_tokens, temperature, enable_rag, save_chat_history_to_url])
 
 							return new_saved_settings, None
 
@@ -1095,7 +1111,7 @@ def main():
 
 
 						append_or_overwrite_saved_settings_button.click(
-								append_or_overwrite_setting, inputs=[saved_settings_df, setting_name, platform, endpoint, azure_deployment, azure_api_version,model_name, max_tokens, temperature, save_chat_history_to_url], outputs=[saved_settings_df, selected_setting], queue=False, show_progress="hidden"
+								append_or_overwrite_setting, inputs=[saved_settings_df, setting_name, platform, endpoint, azure_deployment, azure_api_version,model_name, max_tokens, temperature, enable_rag, save_chat_history_to_url], outputs=[saved_settings_df, selected_setting], queue=False, show_progress="hidden"
 							).then(
 								serialize_saved_settings, inputs=saved_settings_df, outputs=serialized_saved_settings_state, queue=False, show_progress="hidden",
 							).then(
@@ -1127,8 +1143,7 @@ def main():
 						temp_saved_settings = gr.JSON(visible=False)
 						temp_saved_settings.change(lambda x: x, inputs=temp_saved_settings, outputs=saved_settings_df, queue=False, show_progress="hidden")
 
-						setting_items = [setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, 
-							temperature, save_chat_history_to_url, temp_saved_settings]
+						setting_items = [setting_name, platform, endpoint, azure_deployment, azure_api_version, model_name, max_tokens, temperature, enable_rag, save_chat_history_to_url, temp_saved_settings]
 						reset_button.click(None, inputs=None, outputs=setting_items, 
 							js="() =&gt; resetSettings()", show_progress="hidden")
 
@@ -1147,8 +1162,7 @@ def main():
 
 					with gr.Column(scale=2):
 
-						additional_inputs = [context, platform, endpoint, azure_deployment, azure_api_version, api_key, 
-							model_name, max_tokens, temperature]
+						additional_inputs = [context, platform, endpoint, azure_deployment, azure_api_version, api_key, model_name, max_tokens, temperature, enable_rag]
 
 						with gr.Blocks() as chat:
 							gr.Markdown(f"# Chat with your PDF")
